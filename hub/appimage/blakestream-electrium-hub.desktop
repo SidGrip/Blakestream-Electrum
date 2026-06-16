@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Blakestream Electrium Hub
+Comment=Six-coin Blakestream Electrium wallet hub
+Exec=blakestream-electrium-hub
+Icon=blakestream-electrium-hub
+Categories=Finance;Network;
+Terminal=false

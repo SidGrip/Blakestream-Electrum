@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APPDIR="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+HUB_SHARE="$APPDIR/usr/share/blakestream-electrium-hub"
+HUB_PY="$APPDIR/usr/bin/electrium_hub.py"
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/blakestream-electrium-hub/25.2"
+CACHE_OUTPUTS="$CACHE_ROOT/outputs"
+
+TICKERS=(BLC PHO BBTC ELT LIT UMO)
+
+coin_name() {
+    case "$1" in
+        BLC) printf 'Blakecoin' ;;
+        PHO) printf 'Photon' ;;
+        BBTC) printf 'BlakeBitcoin' ;;
+        ELT) printf 'Electron' ;;
+        LIT) printf 'Lithium' ;;
+        UMO) printf 'UniversalMolecule' ;;
+        *) return 1 ;;
+    esac
+}
+
+coin_file() {
+    case "$1" in
+        BLC) printf 'Electrium-BLC-4.7.2-x86_64.AppImage' ;;
+        PHO) printf 'Electrium-PHO-4.7.2-x86_64.AppImage' ;;
+        BBTC) printf 'Electrium-BBTC-4.7.2-x86_64.AppImage' ;;
+        ELT) printf 'Electrium-ELT-4.7.2-x86_64.AppImage' ;;
+        LIT) printf 'Electrium-LIT-4.7.2-x86_64.AppImage' ;;
+        UMO) printf 'Electrium-UMO-4.7.2-x86_64.AppImage' ;;
+        *) return 1 ;;
+    esac
+}
+
+is_ticker() {
+    local ticker="${1:-}"
+    local candidate
+    for candidate in "${TICKERS[@]}"; do
+        [[ "$candidate" == "$ticker" ]] && return 0
+    done
+    return 1
+}
+
+source_appimage() {
+    local ticker="$1"
+    printf '%s/outputs/%s/linux/%s' "$HUB_SHARE" "$ticker" "$(coin_file "$ticker")"
+}
+
+cached_appimage() {
+    local ticker="$1"
+    printf '%s/%s/linux/%s' "$CACHE_OUTPUTS" "$ticker" "$(coin_file "$ticker")"
+}
+
+sync_coin() {
+    local ticker="$1"
+    local src dest src_size dest_size
+    src="$(source_appimage "$ticker")"
+    dest="$(cached_appimage "$ticker")"
+    if [[ ! -f "$src" ]]; then
+        printf 'missing embedded AppImage for %s: %s\n' "$ticker" "$src" >&2
+        return 1
+    fi
+    mkdir -p "$(dirname "$dest")"
+    src_size="$(stat -c '%s' "$src")"
+    dest_size=0
+    [[ -f "$dest" ]] && dest_size="$(stat -c '%s' "$dest")"
+    if [[ "$src_size" != "$dest_size" ]]; then
+        cp -f "$src" "$dest"
+    fi
+    chmod +x "$dest"
+}
+
+sync_all() {
+    local ticker
+    for ticker in "${TICKERS[@]}"; do
+        sync_coin "$ticker"
+    done
+}
+
+has_network_flag() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --testnet|--regtest|--regnet)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+run_hub() {
+    local cmd="${1:-}"
+    local outputs="$HUB_SHARE/outputs"
+    case "$cmd" in
+        launch|stop)
+            sync_all
+            outputs="$CACHE_OUTPUTS"
+            ;;
+    esac
+    exec python3 "$HUB_PY" --outputs "$outputs" "$@"
+}
+
+show_text() {
+    local title="$1"
+    local body="$2"
+    local file="$CACHE_ROOT/dialog.txt"
+    mkdir -p "$CACHE_ROOT"
+    printf '%s\n' "$body" > "$file"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --text-info --title="$title" --filename="$file" --width=900 --height=600 || true
+    elif command -v xmessage >/dev/null 2>&1; then
+        xmessage -center -title "$title" -file "$file" || true
+    else
+        printf '%s\n' "$body"
+    fi
+}
+
+hub_status_dialog() {
+    local output
+    if output="$(python3 "$HUB_PY" --outputs "$HUB_SHARE/outputs" status 2>&1)"; then
+        show_text "Blakestream Electrium Hub Status" "$output"
+    else
+        show_text "Blakestream Electrium Hub Status" "$output"
+        return 1
+    fi
+}
+
+hub_setup_dialog() {
+    local output
+    if output="$(python3 "$HUB_PY" ensure-config --include-password 2>&1)"; then
+        show_text "Blakestream Electrium Hub Setup" "$output"
+    else
+        show_text "Blakestream Electrium Hub Setup" "$output"
+        return 1
+    fi
+}
+
+launch_coin() {
+    local ticker="$1"
+    shift || true
+    sync_coin "$ticker"
+    if has_network_flag "$@"; then
+        exec "$(cached_appimage "$ticker")" "$@"
+    fi
+    exec "$(cached_appimage "$ticker")" --testnet "$@"
+}
+
+print_help() {
+    cat <<'EOF'
+Blakestream Electrium Hub 25.2
+
+Usage:
+  Blakestream-Electrium-Hub.AppImage
+      Open the desktop chooser.
+
+  Blakestream-Electrium-Hub.AppImage BLC [wallet args...]
+      Launch one embedded wallet. Supported tickers:
+      BLC PHO BBTC ELT LIT UMO
+
+  Blakestream-Electrium-Hub.AppImage hub <list|status|config|ensure-config|launch|stop> ...
+      Run the JSON Hub coordinator command.
+
+Wallet launches default to --testnet. Pass --regtest explicitly for regnet.
+Mainnet launches are intentionally not the default for the 25.2 BIP gate period.
+EOF
+}
+
+show_tty_menu() {
+    local choice ticker
+    printf 'Blakestream Electrium Hub 25.2\n\n'
+    printf '1) BLC  Blakecoin testnet wallet\n'
+    printf '2) PHO  Photon testnet wallet\n'
+    printf '3) BBTC BlakeBitcoin testnet wallet\n'
+    printf '4) ELT  Electron testnet wallet\n'
+    printf '5) LIT  Lithium testnet wallet\n'
+    printf '6) UMO  UniversalMolecule testnet wallet\n'
+    printf '7) Setup Hub RPC configs\n'
+    printf '8) Hub status\n'
+    printf '\nSelect: '
+    read -r choice
+    case "$choice" in
+        1) ticker=BLC ;;
+        2) ticker=PHO ;;
+        3) ticker=BBTC ;;
+        4) ticker=ELT ;;
+        5) ticker=LIT ;;
+        6) ticker=UMO ;;
+        7) hub_setup_dialog; return ;;
+        8) hub_status_dialog; return ;;
+        *) return 1 ;;
+    esac
+    launch_coin "$ticker"
+}
+
+show_gui_menu() {
+    local selected
+    selected="$(
+        zenity --list \
+            --title="Blakestream Electrium Hub" \
+            --text="Choose a testnet wallet or Hub action." \
+            --column="Action" \
+            --column="Description" \
+            --print-column=1 \
+            BLC "Blakecoin testnet wallet" \
+            PHO "Photon testnet wallet" \
+            BBTC "BlakeBitcoin testnet wallet" \
+            ELT "Electron testnet wallet" \
+            LIT "Lithium testnet wallet" \
+            UMO "UniversalMolecule testnet wallet" \
+            SETUP "Create/update Hub RPC configs" \
+            STATUS "Show Hub JSON status" \
+            --width=620 \
+            --height=380
+    )" || return 0
+    case "$selected" in
+        SETUP) hub_setup_dialog ;;
+        STATUS) hub_status_dialog ;;
+        BLC|PHO|BBTC|ELT|LIT|UMO) launch_coin "$selected" ;;
+    esac
+}
+
+main() {
+    local first="${1:-}"
+    case "$first" in
+        "")
+            if command -v zenity >/dev/null 2>&1; then
+                show_gui_menu
+            elif [[ -t 0 ]]; then
+                show_tty_menu
+            else
+                print_help
+            fi
+            ;;
+        --help|-h)
+            print_help
+            ;;
+        --version|--hub-version)
+            printf 'Blakestream Electrium Hub 25.2\n'
+            ;;
+        hub)
+            shift
+            run_hub "$@"
+            ;;
+        list|status|config|ensure-config|launch|stop)
+            run_hub "$@"
+            ;;
+        *)
+            first="${first^^}"
+            if is_ticker "$first"; then
+                shift
+                launch_coin "$first" "$@"
+            else
+                printf 'unknown Hub command or ticker: %s\n\n' "$1" >&2
+                print_help >&2
+                return 2
+            fi
+            ;;
+    esac
+}
+
+main "$@"

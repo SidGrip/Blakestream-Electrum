@@ -1,0 +1,14 @@
+**/__pycache__/
+.cache/
+.pytest_cache/
+*/*~
+*.#*
+*#
+*~
+docs/_build
+/build
+/dist
+/electrumx.egg-info
+.vscode/
+.mypy_cache/
+.idea/
