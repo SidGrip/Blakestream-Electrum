@@ -35,8 +35,12 @@ def load_coin(repo_root: Path, coin_code: str) -> dict:
 
 def copy_ignore(_dir: str, names: list[str]) -> set[str]:
     ignored = set()
+    parts = Path(_dir).parts
+    in_desktop_root = len(parts) >= 2 and parts[-2:] == ("unified", "desktop")
     for name in names:
         if name in COPY_IGNORE_NAMES or name.startswith(".venv"):
+            ignored.add(name)
+        elif in_desktop_root and name in {"backend", "release"}:
             ignored.add(name)
         elif name.endswith((".pyc", ".pyo")):
             ignored.add(name)

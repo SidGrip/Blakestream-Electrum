@@ -1853,13 +1853,20 @@ class Commands(Logger):
             max_cltv_delta=max_cltv,
             max_fee_msat=max_fee_msat,
         )
-        success, log = await lnworker.pay_invoice(invoice_obj, budget=budget)
-        return {
+        success, log, failure_reason = await lnworker.pay_invoice(
+            invoice_obj,
+            budget=budget,
+            return_failure_reason=True,
+        )
+        result = {
             'payment_hash': payment_hash.hex(),
             'success': success,
             'preimage': lnworker.get_preimage(payment_hash).hex() if success else None,
             'log': [x.formatted_tuple() for x in log]
         }
+        if not success and failure_reason:
+            result['failure_reason'] = failure_reason
+        return result
 
     @command('wl')
     async def nodeid(self, wallet: Abstract_Wallet = None):
@@ -1903,6 +1910,27 @@ class Commands(Logger):
                 'state': chan.get_state().name,
             } for channel_id, chan in backups
         ]
+
+    @command('wl')
+    async def lightning_capacity(self, wallet: Abstract_Wallet = None):
+        """Return exact Lightning send/receive capacity for preflight checks."""
+        if not wallet.lnworker:
+            return {
+                'enabled': False,
+                'num_channels': 0,
+                'can_send_sat': 0,
+                'can_receive_sat': 0,
+            }
+        channels = [
+            chan for chan in wallet.lnworker.channels.values()
+            if chan.get_state().name == 'OPEN'
+        ]
+        return {
+            'enabled': True,
+            'num_channels': len(channels),
+            'can_send_sat': int(wallet.lnworker.num_sats_can_send()),
+            'can_receive_sat': int(wallet.lnworker.num_sats_can_receive()),
+        }
 
     @command('wnl')
     async def enable_htlc_settle(self, b: bool, wallet: Abstract_Wallet = None):

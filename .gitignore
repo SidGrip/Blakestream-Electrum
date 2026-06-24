@@ -30,6 +30,13 @@ contrib/trigger_binaries
 
 # build workspaces
 .build-multi/
+
+# multiwallet (unified/) — track source, not build artifacts
+node_modules/
+__pycache__/
+unified/desktop/backend/
+unified/desktop/release/
+
 contrib/build-wine/tmp/
 contrib/build-wine/build/
 contrib/build-wine/.cache/

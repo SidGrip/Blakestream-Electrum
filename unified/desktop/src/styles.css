@@ -1,0 +1,348 @@
+:root {
+  /* Legacy names kept for compatibility with existing class/inline users. */
+  --bg: #1a1d21;
+  --panel: #22262b;
+  --border: #2e333a;
+  --text: #e6e6e6;
+  --muted: #8a929b;
+  --accent: #4fc3f7;
+  --positive: #4caf50;
+  --negative: #ef5350;
+  /* Glassmorphism base + coin-driven accent. --coin* are retinted by App.tsx
+     when the selected coin changes; defaults are the cyan accent. */
+  --bg-base: #0f1217;
+  --coin: #4fc3f7;
+  --coin-rgb: 79, 195, 247;
+  --coin-text: #0e1013;
+  --coin-glow: #4fc3f7;
+  /* Origin point (set inline on coin switch) for the Aurora Pulse radial glow. */
+  --pulse-origin: 50% 50%;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  /* Smoother aurora: large elliptical coin glows with multi-stop falloff (seamless fade),
+     a faint conic for depth, and a fine-stepped dark base. #root stays transparent so the
+     body::before noise (anti-banding) shows through under the glass UI. */
+  background:
+    radial-gradient(ellipse 92% 78% at 18% 26%,
+      rgba(var(--coin-rgb), 0.095) 0%, rgba(var(--coin-rgb), 0.042) 28%,
+      rgba(var(--coin-rgb), 0.012) 52%, transparent 71%),
+    radial-gradient(ellipse 88% 72% at 81% 76%,
+      rgba(var(--coin-rgb), 0.068) 0%, rgba(var(--coin-rgb), 0.029) 34%,
+      rgba(var(--coin-rgb), 0.008) 59%, transparent 74%),
+    conic-gradient(at 50% 48%,
+      transparent 0deg, rgba(var(--coin-rgb), 0.018) 90deg,
+      transparent 210deg, rgba(var(--coin-rgb), 0.011) 300deg, transparent 360deg),
+    linear-gradient(148deg,
+      #0c0f14 0%, #11151a 22%, #161a1f 46%, #1a1d21 71%, #1f2227 100%);
+  /* Coin-glow layers originate from the last click point so the Aurora Pulse blooms there. */
+  background-position: var(--pulse-origin), var(--pulse-origin), 0 0, 0 0;
+  background-size: cover, cover, cover, cover;
+  background-attachment: fixed;
+  transition: background 620ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* Fractal-noise dither so the dark gradient never bands (Linear/Arc/Figma technique).
+   Sub-pixel, GPU-tiled, negligible cost; sits above the body gradient and below the app. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+body {
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,
+    Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow: hidden;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* ---- Reusable glass surfaces ---- */
+.glass {
+  background: rgba(34, 38, 43, 0.58);
+  -webkit-backdrop-filter: blur(20px) saturate(170%) contrast(108%);
+  backdrop-filter: blur(20px) saturate(170%) contrast(108%);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.15),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  position: relative;
+}
+
+.glass-dark {
+  background: rgba(20, 23, 27, 0.78);
+  -webkit-backdrop-filter: blur(13px) saturate(140%);
+  backdrop-filter: blur(13px) saturate(140%);
+}
+
+/* ---- App shell: left rail + main column ---- */
+.app-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100vh;
+  width: 100vw;
+  isolation: isolate;
+}
+
+/* Left rail: coin list (scrolls) with the holdings donut pinned below. */
+.rail {
+  background: rgba(20, 23, 27, 0.78);
+  -webkit-backdrop-filter: blur(13px) saturate(140%);
+  backdrop-filter: blur(13px) saturate(140%);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  min-width: 0;
+  isolation: isolate;
+}
+
+/* ---- Panel surface helper (now frosted glass) ---- */
+.panel {
+  background: rgba(34, 38, 43, 0.62);
+  -webkit-backdrop-filter: blur(16px) saturate(155%);
+  backdrop-filter: blur(16px) saturate(155%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+/* ---- Generic helpers ---- */
+.muted {
+  color: var(--muted);
+}
+
+.positive {
+  color: var(--positive);
+}
+
+.negative {
+  color: var(--negative);
+}
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+.empty-caption {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---- Error banner ---- */
+.error-banner {
+  background: rgba(239, 83, 80, 0.12);
+  border: 1px solid var(--negative);
+  color: var(--negative);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+/* ---- Scrollbars (dark) ---- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #353b43;
+  border-radius: 6px;
+  border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #434a54;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #353b43 transparent;
+}
+
+/* ---- Misc reset for buttons/tables used by feature agents ---- */
+button {
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: transform 0.18s cubic-bezier(0.23, 1, 0.32, 1), box-shadow 0.2s,
+    filter 0.2s, background 0.2s;
+}
+
+button:not(:disabled):hover {
+  transform: translateY(-1px);
+  filter: brightness(1.07);
+}
+
+button:not(:disabled):active {
+  transform: scale(0.985);
+}
+
+/* Left-rail coin rows: brighten on hover without the lift used by pill buttons.
+   The active row keeps its coin-tinted gradient (only inactive rows brighten). */
+.rail-row:not(:disabled):hover {
+  transform: none;
+}
+
+.rail-row:not(.is-active):not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Coin-tinted focus ring for every inline-styled input/textarea/select. */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--coin) !important;
+  box-shadow: 0 0 0 3px rgba(var(--coin-rgb), 0.20) !important;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* ---- Signature "Aurora Pulse" on coin switch ---- */
+@keyframes auroraPulse {
+  0% {
+    filter: brightness(1.12) saturate(1.25);
+  }
+  40% {
+    filter: brightness(0.98) saturate(0.95);
+  }
+  100% {
+    filter: brightness(1) saturate(1.08);
+  }
+}
+
+body.coin-switching {
+  animation: auroraPulse 420ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* ---- Tab cross-fade: replays on each tab change via key remount ---- */
+@keyframes tabEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tab-enter {
+  animation: tabEnter 240ms ease both;
+}
+
+/* Centered error overlay: fade in, hold, then fade out over its 4s lifetime. */
+@keyframes errorOverlayPop {
+  0% { opacity: 0; transform: translateY(6px) scale(0.97); }
+  6% { opacity: 1; transform: none; }
+  85% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: scale(0.99); }
+}
+
+.error-overlay {
+  animation: errorOverlayPop 4s ease forwards;
+}
+
+/* The Send card flips when it swaps between the pay-to form and the confirm & send view
+   (its parent sets `perspective`; key={stage} remounts it so this replays on each swap). */
+@keyframes sendFlip {
+  from { opacity: 0.25; transform: rotateY(92deg); }
+  60%  { opacity: 1; }
+  to   { opacity: 1; transform: rotateY(0deg); }
+}
+
+.send-flip {
+  animation: sendFlip 0.42s ease;
+  transform-origin: center;
+}
+
+/* Small inline "refreshing" spinner (e.g. Settings → Network header). */
+@keyframes miniSpin {
+  to { transform: rotate(360deg); }
+}
+
+.mini-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--coin);
+  border-radius: 50%;
+  animation: miniSpin 0.7s linear infinite;
+}
+
+/* ---- Accessibility: neutralize only the decorative v2 motion ----
+   Keeps functional spinners (setup-spin), launch-pulse and loading-dots alive. */
+@media (prefers-reduced-motion: reduce) {
+  .tab-enter {
+    animation: none !important;
+  }
+
+  .send-flip {
+    animation: none !important;
+  }
+
+  body.coin-switching {
+    animation: none !important;
+  }
+
+  button:not(:disabled):hover {
+    transform: none !important;
+  }
+}

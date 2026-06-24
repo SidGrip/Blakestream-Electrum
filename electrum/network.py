@@ -731,6 +731,9 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
                 self.default_server = ServerAddr.from_str("localhost:1:s")
             else:
                 self.default_server = pick_random_server(allowed_protocols=self._allowed_protocols)
+                if self.default_server is None:
+                    self.logger.warning('no Electrum servers configured; falling back to offline localhost placeholder.')
+                    self.default_server = ServerAddr.from_str("localhost:1:s")
         assert isinstance(self.default_server, ServerAddr), f"invalid type for default_server: {self.default_server!r}"
 
     def _set_proxy(self, proxy: ProxySettings):

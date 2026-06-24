@@ -34,7 +34,8 @@
     "electrum_port_tcp": "50001",
     "electrum_port_ssl": "50002",
     "auxpow_start_height": 0,
-    "auxpow_chain_id": 0
+    "auxpow_chain_id": 0,
+    "ln_hub": "021175106ad14db7e823743a8cbbce2c081f098da3aae4640b20cef567c5eb8965@212.28.183.19:9740"
   },
   "BBTC": {
     "coin_name": "BlakeBitcoin",
@@ -71,7 +72,8 @@
     "electrum_port_tcp": "50011",
     "electrum_port_ssl": "50012",
     "auxpow_start_height": 500000,
-    "auxpow_chain_id": 5
+    "auxpow_chain_id": 5,
+    "ln_hub": "03f38731421ea6867e5a4fa1dad42b0d68ed5c673d3ad3ad1c1863338c1f8c6be7@212.28.183.19:9741"
   },
   "ELT": {
     "coin_name": "Electron",
@@ -108,7 +110,8 @@
     "electrum_port_tcp": "50021",
     "electrum_port_ssl": "50022",
     "auxpow_start_height": 500000,
-    "auxpow_chain_id": 7
+    "auxpow_chain_id": 7,
+    "ln_hub": "02a4a016a58d54cca5be7ae7ea2171f5c84f6b50757878589a9dcedaf5cf101247@212.28.183.19:9742"
   },
   "LIT": {
     "coin_name": "Lithium",
@@ -145,7 +148,8 @@
     "electrum_port_tcp": "50031",
     "electrum_port_ssl": "50032",
     "auxpow_start_height": 160000,
-    "auxpow_chain_id": 6
+    "auxpow_chain_id": 6,
+    "ln_hub": "020a64051c2e008b992d10db0fcf2795c107ad195accc1f9bd45d1c0e9d86a8ef1@212.28.183.19:9743"
   },
   "PHO": {
     "coin_name": "Photon",
@@ -182,7 +186,8 @@
     "electrum_port_tcp": "50041",
     "electrum_port_ssl": "50042",
     "auxpow_start_height": 160000,
-    "auxpow_chain_id": 2
+    "auxpow_chain_id": 2,
+    "ln_hub": "02c42bc8999707a02145fd001194a866073a724b18e9257ccbde80173b183d71ad@212.28.183.19:9744"
   },
   "UMO": {
     "coin_name": "UniversalMolecule",
@@ -219,6 +224,7 @@
     "electrum_port_tcp": "50051",
     "electrum_port_ssl": "50052",
     "auxpow_start_height": 160000,
-    "auxpow_chain_id": 15
+    "auxpow_chain_id": 15,
+    "ln_hub": "02cbcb7d566b4008092bffbf69b9f20e289f7549a3435b226722664c830ce0f00b@212.28.183.19:9745"
   }
 }

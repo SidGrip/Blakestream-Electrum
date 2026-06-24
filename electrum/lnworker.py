@@ -1812,7 +1812,8 @@ class LNWallet(Logger):
             full_path: LNPaymentPath = None,
             channels: Optional[Sequence[Channel]] = None,
             budget: Optional[PaymentFeeBudget] = None,
-    ) -> Tuple[bool, List[HtlcLog]]:
+            return_failure_reason: bool = False,
+    ) -> Union[Tuple[bool, List[HtlcLog]], Tuple[bool, List[HtlcLog], Optional[str]]]:
         bolt11 = invoice.lightning_invoice
         lnaddr = self._check_bolt11_invoice(bolt11, amount_msat=amount_msat)
         min_final_cltv_delta = lnaddr.get_min_final_cltv_delta()
@@ -1848,6 +1849,7 @@ class LNWallet(Logger):
             # we don't expect lots of failed htlcs with trampoline, so we can fail sooner
             attempts = 30
         success = False
+        reason = None
         try:
             await self.pay_to_node(
                 node_pubkey=invoice_pubkey,
@@ -1878,6 +1880,8 @@ class LNWallet(Logger):
             self.set_invoice_status(key, PR_UNPAID)
             util.trigger_callback('payment_failed', self.wallet, key, reason)
         log = self.logs[key]
+        if return_failure_reason:
+            return success, log, reason
         return success, log
 
     async def pay_to_node(
@@ -3178,16 +3182,21 @@ class LNWallet(Logger):
                 if chan.short_channel_id is not None
             }
         for chan in channels:
-            alias_or_scid = chan.get_remote_scid_alias() or chan.short_channel_id
+            # Prefer the real short_channel_id over the remote scid_alias in routing hints.
+            # Our hubs route over private channels and advertise their policy only via the
+            # channel_update attached to onion errors, which carries the real scid. A hint
+            # keyed by the alias makes the sender's retry reject that update (scid mismatch),
+            # so the corrected cltv_delta never gets applied and the payment fails.
+            alias_or_scid = chan.short_channel_id or chan.get_remote_scid_alias()
             assert isinstance(alias_or_scid, bytes), alias_or_scid
             channel_info = get_mychannel_info(chan.short_channel_id, scid_to_my_channels)
-            # note: as a fallback, if we don't have a channel update for the
-            # incoming direction of our private channel, we fill the invoice with garbage.
-            # the sender should still be able to pay us, but will incur an extra round trip
-            # (they will get the channel update from the onion error)
-            # at least, that's the theory. https://github.com/lightningnetwork/lnd/issues/2066
-            fee_base_msat = fee_proportional_millionths = 0
-            cltv_delta = 1  # lnd won't even try with zero
+            # If we don't have a channel update for the incoming direction of our
+            # private channel, use our local policy defaults instead of deliberately
+            # low dummy data. Our direct hub channels reject a one-block hint with
+            # INCORRECT_CLTV_EXPIRY before the payer can recover a useful route.
+            fee_base_msat = chan.forwarding_fee_base_msat
+            fee_proportional_millionths = chan.forwarding_fee_proportional_millionths
+            cltv_delta = min(chan.forwarding_cltv_delta + 30, 1000)
             missing_info = True
             if channel_info:
                 policy = get_mychannel_policy(channel_info.short_channel_id, chan.node_id, scid_to_my_channels)
@@ -3199,7 +3208,10 @@ class LNWallet(Logger):
             if missing_info:
                 self.logger.info(
                     f"Warning. Missing channel update for our channel {chan.short_channel_id}; "
-                    f"filling invoice with incorrect data.")
+                    f"using local fallback policy "
+                    f"fee_base_msat={fee_base_msat}, "
+                    f"fee_proportional_millionths={fee_proportional_millionths}, "
+                    f"cltv_delta={cltv_delta}.")
             routing_hints.append(('r', [(
                 chan.node_id,
                 alias_or_scid,

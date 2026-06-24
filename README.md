@@ -19,10 +19,31 @@ Electron-ELT (ELT), Lithium (LIT), Photon (PHO), UniversalMolecule (UMO) — and
 
 | Script | Builds |
 |--------|--------|
+| `./build-electrum.sh -blc -pho [--linux\|--windows\|--macos\|--wheel]` | user-facing root builder for selected standalone wallets |
+| `./build-electrum.sh -all [--linux\|--windows\|--macos\|--wheel]` | all six standalone wallets |
+| `./build-electrum.sh -multi [--linux\|--windows\|--macos]` | unified one-seed multiwallet |
 | `scripts/build-single-wallets.sh [linux\|windows\|macos\|wheel\|all] [COINS…]` | the six standalone wallets; OS chosen (interactive if omitted); each target builds natively on this machine (macOS must run on a Mac) |
 | `scripts/build_wallet_variant.sh <COIN> <linux\|windows\|macos\|wheel>` | one coin, one OS (the engine the rest call) |
 | `build-electrumx.sh [--smoke]` | the shared ElectrumX server image `sidgrip/electrumx-blakestream` (deploy: `server/docker-compose.yml`, six per-coin instances) |
 | `contrib/build-wine/build-base.sh` | the prebuilt Windows build base `sidgrip/electrum-wine-base` |
+
+For a fresh clone, use `./build-electrum.sh`. If no target is passed, an x86_64
+Linux Docker host builds Linux+Windows, while a Mac builds macOS. The script is
+local-only: run it on the build server for Linux/Windows and on the Mac for macOS.
+Add `--dry-run` to print the lower-level commands without building.
+
+Examples:
+
+```bash
+./build-electrum.sh -blc
+./build-electrum.sh -blc -pho --linux
+./build-electrum.sh -all --linux --windows
+./build-electrum.sh -multi --linux
+./build-electrum.sh -multi --windows
+./build-electrum.sh -all -multi --linux --windows
+./build-electrum.sh -all --macos
+./build-electrum.sh -multi --macos
+```
 
 Each coin's 25.2 repo also ships a per-coin **`build-electrum.sh <linux|windows|macos|wheel|all>`** that
 delegates here (canonical copy in `contrib/coin-repo/`, distributed by `scripts/sync-build-electrum.sh`).
@@ -31,8 +52,9 @@ Docker host (Linux, Windows, or an Intel Mac) builds either; only the macOS app 
 
 **Build environments:** Linux AppImage in a glibc-portable Debian-bullseye container
 (`contrib/build-linux/appimage`); Windows `.exe` via the prebuilt `sidgrip/electrum-wine-base`
-(`contrib/build-wine`); macOS `.dmg`/`.app` natively on a Mac (`contrib/osx/make_osx.sh`). Artifacts land
-in `outputs/<COIN>/<os>/`, named `Electrium-<COIN>-<version>`.
+(`contrib/build-wine`) for standalone wallets and `sidgrip/electrium-multiwallet-wine-builder:25.2`
+for the multiwallet; macOS `.dmg`/`.app` natively on a Mac (`contrib/osx/make_osx.sh`). Artifacts land
+in `outputs/<COIN>/<os>/`, named `Electrium-<COIN>-<version>`, and `outputs/multiwallet/<os>/`.
 Server deploy: see `server/README.md`.
 
 

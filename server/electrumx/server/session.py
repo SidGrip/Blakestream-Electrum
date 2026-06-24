@@ -1276,13 +1276,27 @@ class ElectrumX(SessionBase):
 
         number: the number of blocks
         mode: CONSERVATIVE or ECONOMICAL estimation mode
+
+        Blakestream patch: chains with thin mempools (5/6 of the family) have
+        no fee market, so estimatesmartfee returns None / -1. When that happens
+        and ELECTRUMX_DEFAULT_FEE_BTC_KVB is set, return the configured
+        fallback so wallets can still autocalc fees. Real estimates pass
+        through unchanged.
         '''
         number = non_negative_integer(number)
         self.bump_cost(2.0)
         if mode:
-            return await self.daemon_request('estimatefee', number, mode)
+            result = await self.daemon_request('estimatefee', number, mode)
         else:
-            return await self.daemon_request('estimatefee', number)
+            result = await self.daemon_request('estimatefee', number)
+        if result is None or (isinstance(result, (int, float)) and result < 0):
+            fallback = os.environ.get('ELECTRUMX_DEFAULT_FEE_BTC_KVB')
+            if fallback:
+                try:
+                    return float(fallback)
+                except (TypeError, ValueError):
+                    pass
+        return result
 
     async def ping(self):
         '''Serves as a connection keep-alive mechanism and for the client to

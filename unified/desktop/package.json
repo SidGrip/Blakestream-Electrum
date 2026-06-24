@@ -1,0 +1,81 @@
+{
+  "name": "blakestream-electrum",
+  "version": "0.25.2",
+  "description": "Blakestream Wallet \u2014 multiwallet desktop dashboard for the Blakestream 6-coin family",
+  "private": true,
+  "author": "Blakestream",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "electron:dev": "vite build && electron .",
+    "dist": "vite build && electron-builder --linux AppImage",
+    "dist:linux": "vite build && electron-builder --linux AppImage",
+    "dist:win": "vite build && electron-builder --win portable nsis --x64",
+    "dist:mac": "vite build && electron-builder --mac dmg zip --x64"
+  },
+  "dependencies": {
+    "qrcode.react": "^3.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^2.12.0",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0"
+  },
+  "build": {
+    "appId": "com.blakestream.electrum",
+    "productName": "Blakestream Wallet",
+    "files": [
+      "dist/**",
+      "electron/**"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend"
+      },
+      {
+        "from": "build/icons/256x256.png",
+        "to": "icon.png"
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "linux": {
+      "icon": "build/icons",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Finance"
+    },
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.finance"
+    }
+  }
+}

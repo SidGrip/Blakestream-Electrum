@@ -210,9 +210,11 @@ class BlockProcessor(object):
         first = self.height + 1
         blocks = [self.coin.block(raw_block, first + n)
                   for n, raw_block in enumerate(raw_blocks)]
+        await asyncio.sleep(0)   # yield 1 (heavy parse + Blake header work)
         headers = [block.header for block in blocks]
         hprevs = [self.coin.header_prevhash(h) for h in headers]
         chain = [self.tip] + [self.coin.header_hash(h) for h in headers[:-1]]
+        await asyncio.sleep(0)   # yield 2 (header_hash() is Blake-heavy)
 
         if hprevs == chain:
             start = time.time()
