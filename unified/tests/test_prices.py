@@ -80,18 +80,16 @@ def test_dig_and_to_decimal():
 
 
 def test_safe_fetch_guards_offline():
-    # All reject before any socket connect (literal IPs / bad scheme) — no network.
-    assert prices.safe_fetch_json("http://example.com/x") is None      # not https
-    assert prices.safe_fetch_json("ftp://example.com/x") is None       # not https
-    assert prices.safe_fetch_json("https://127.0.0.1/x") is None       # loopback
-    assert prices.safe_fetch_json("https://10.0.0.5/x") is None        # RFC1918
-    assert prices.safe_fetch_json("https://169.254.1.1/x") is None     # link-local
+    # The only pre-connect guard is the scheme — only http/https URLs are fetched (host is the user's choice).
+    assert prices.safe_fetch_json("ftp://example.com/x") is None       # bad scheme
+    assert prices.safe_fetch_json("file:///etc/passwd") is None        # bad scheme
+    assert prices.safe_fetch_json("not-a-url") is None                 # no scheme/host
 
 
 def test_http_template_provider_role_and_extract(monkeypatch):
     calls = []
 
-    def fake(url, headers=None, allow_private=False, timeout=None):
+    def fake(url, headers=None, timeout=None):
         calls.append((url, headers))
         return {"bitcoin": {"usd": "65000.5"}}
 
@@ -108,7 +106,7 @@ def test_http_template_provider_role_and_extract(monkeypatch):
 def test_http_template_api_key_header(monkeypatch):
     seen = {}
 
-    def fake(url, headers=None, allow_private=False, timeout=None):
+    def fake(url, headers=None, timeout=None):
         seen["headers"] = headers
         return {"data": {"BLC": {"quote": {"USD": {"price": 0.0005}}}}}
 
@@ -123,7 +121,7 @@ def test_http_template_api_key_header(monkeypatch):
 
 
 def test_value_fiat_direct_and_bridge(monkeypatch):
-    def fake(url, headers=None, allow_private=False, timeout=None):
+    def fake(url, headers=None, timeout=None):
         return {"bitcoin": {"usd": "60000"}} if "vs_currencies=usd" in url else None
 
     monkeypatch.setattr(prices, "safe_fetch_json", fake)

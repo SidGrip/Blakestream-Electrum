@@ -8,7 +8,7 @@
 }
 
 .setup-card {
-  width: 460px;
+  width: 520px;
   max-width: 90%;
   background: rgba(34, 38, 43, 0.58);
   -webkit-backdrop-filter: blur(20px) saturate(170%) contrast(108%);
@@ -50,13 +50,15 @@
 
 .setup-tabs button {
   flex: 1;
-  padding: 9px 0;
+  min-height: 42px;
+  padding: 8px 6px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #8a929b;
   border-radius: 9px;
   cursor: pointer;
   font-weight: 600;
+  line-height: 1.2;
 }
 
 .setup-tabs button.active {
@@ -84,6 +86,50 @@
   outline: none;
   border-color: var(--coin);
   box-shadow: 0 0 0 3px rgba(var(--coin-rgb), 0.20);
+}
+
+.setup-backup-box {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(20, 23, 27, 0.42);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.setup-backup-box p {
+  color: #aeb6bf;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 0 10px;
+}
+
+.setup-secondary-btn {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: #e6e6e6;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 600;
+}
+
+.setup-secondary-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.setup-path {
+  margin-top: 9px;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.20);
+  color: #cfd4da;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .setup-btn {
@@ -139,6 +185,16 @@
   background: rgba(239, 83, 80, 0.10);
   border: 1px solid rgba(239, 83, 80, 0.35);
   color: #ef5350;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.setup-success {
+  background: rgba(76, 175, 80, 0.12);
+  border: 1px solid rgba(76, 175, 80, 0.35);
+  color: #9be7a7;
   border-radius: 8px;
   padding: 9px 11px;
   font-size: 13px;

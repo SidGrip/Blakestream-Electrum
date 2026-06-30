@@ -5,19 +5,27 @@
 import { create } from 'zustand'
 import type {
   Coins, Portfolio, Tx, Timeframe, SetupStatus, TabKey, AddressRow, Contact, LnInfo, LnTx, LnRequest,
-  PriceSourcesState, NetworkSettings,
+  PriceSourcesState, NetworkSettings, DexIntegrationSettings,
 } from './types'
 import {
   getCoins, getPortfolio, getHistory, getLnHistoryAll, getInfo, getSetupStatus, getStartup,
   getCoinHistory, getAddresses, getLnStatus, getLnHistory, getLnRequests, getContacts,
   getNetworkSettings, getSessionStatus, lockSession, unlockSession,
-  getDexIntegration, setDexIntegration, setDexIntegrationStartup,
+  getDexIntegration, setDexIntegration, setDexIntegrationStartup, approveDexPairing, forgetDexPairing,
+  clearPendingDexPairing,
+  setCoinColors as apiSetCoinColors,
+  getStartupCoins, setStartupCoins as apiSetStartupCoins,
+  startCoin as apiStartCoin, stopCoin as apiStopCoin,
   getPriceSources, setPriceDisplay as apiSetPriceDisplay, setPriceEnabled as apiSetPriceEnabled,
   createWallet as apiCreateWallet, restoreWallet as apiRestoreWallet,
   unlockWallet as apiUnlockWallet,
 } from './api'
-import type { Startup } from './api'
-import { getFiatCurrency, setFiatCurrency as persistFiatCurrency } from './explorer'
+import type { Startup, StartupCoins } from './api'
+import { COIN_COLORS, COIN_ORDER } from './types'
+import {
+  getFiatCurrency, setFiatCurrency as persistFiatCurrency,
+  getAllocationOpen, setAllocationOpen as persistAllocationOpen,
+} from './explorer'
 
 export interface CoinDetailState {
   history: Tx[]
@@ -58,6 +66,16 @@ function persistCoinColorOverrides(map: Record<string, string>): void {
   }
 }
 
+function effectiveCoinColors(overrides: Record<string, string>): Record<string, string> {
+  return { ...COIN_COLORS, ...overrides }
+}
+
+function syncCoinColorsToBackend(overrides: Record<string, string>): void {
+  void apiSetCoinColors(effectiveCoinColors(overrides)).catch(() => {
+    /* backend may still be starting; a later color edit will retry */
+  })
+}
+
 // Per-coin fiat display mode (true = show this coin's balance in fiat), persisted across restarts.
 const COIN_FIAT_MODE_KEY = 'coinFiatMode'
 
@@ -82,6 +100,55 @@ function persistCoinFiatMode(map: Record<string, boolean>): void {
   }
 }
 
+// Global balance display mode for the header AND the left rail: coin amount / Lightning / fiat.
+// The header toggle (and a rail-balance click) cycle it; the rail follows so both stay in sync.
+export type BalanceView = 'onchain' | 'lightning' | 'fiat'
+
+// Which coins auto-start at launch. Mirrors the backend sidecar (the authoritative copy); the
+// localStorage mirror only gives the Coin-settings tab an instant first paint. Default: start all.
+const AUTOSTART_KEY = 'autostartCoins'
+
+function loadAutostart(): StartupCoins {
+  try {
+    const raw = localStorage.getItem(AUTOSTART_KEY)
+    if (raw) {
+      const p = JSON.parse(raw)
+      if (p && typeof p === 'object' && Array.isArray(p.coins)) {
+        return { include_all: p.include_all !== false, coins: p.coins as string[] }
+      }
+    }
+  } catch {
+    /* localStorage unavailable or malformed; default to start-all */
+  }
+  return { include_all: true, coins: [...COIN_ORDER] }
+}
+
+function persistAutostart(pref: StartupCoins): void {
+  try {
+    localStorage.setItem(AUTOSTART_KEY, JSON.stringify({ include_all: pref.include_all, coins: pref.coins }))
+  } catch {
+    /* localStorage unavailable; nothing to persist */
+  }
+}
+
+function syncAutostartToBackend(pref: StartupCoins): void {
+  void apiSetStartupCoins(pref).catch(() => {
+    /* backend may still be starting; a later edit retries */
+  })
+}
+
+// Per-coin running state derived for the wallet list: running | starting | stopped | failed.
+export type CoinRunState = 'running' | 'starting' | 'stopped' | 'failed'
+
+function startupToCoinStatus(s: Startup['coins'][string] | undefined): CoinRunState {
+  switch (s) {
+    case 'ready': return 'running'
+    case 'stopped': return 'stopped'
+    case 'failed': return 'failed'
+    default: return 'starting'   // pending | starting | undefined
+  }
+}
+
 function hasConfiguredPriceApi(st: PriceSourcesState | null): boolean {
   return Boolean(st?.sources?.some((src) => (
     src.enabled !== false
@@ -89,6 +156,9 @@ function hasConfiguredPriceApi(st: PriceSourcesState | null): boolean {
     && src.jsonPath.trim().length > 0
   )))
 }
+
+export type ToolsSection = 'backup' | 'load' | 'sign' | 'crypto' | 'advanced' | 'keys'
+export type HistoryType = 'all' | 'onchain' | 'lightning'
 
 interface StoreState {
   coins: Coins | null
@@ -98,6 +168,8 @@ interface StoreState {
   selected: string | null
   activeTab: TabKey
   lightningMode: 'simple' | 'advanced'
+  toolsSection: ToolsSection
+  historyType: HistoryType
   coinStates: Record<string, CoinDetailState>
   contacts: Contact[]
   timeframe: Timeframe
@@ -110,9 +182,15 @@ interface StoreState {
   initialChecked: boolean
   connectError: boolean
   coinColorOverrides: Record<string, string>
+  // Selective coin startup (Coin settings tab). autostartAll/autostartCoins is the saved preference
+  // (applies next launch). coinStatus is the live per-coin run state for the wallet list.
+  autostartAll: boolean
+  autostartCoins: Record<string, boolean>
+  coinStatus: Record<string, CoinRunState>
   // Price/currency: seeded from localStorage for instant first paint, reconciled from the backend.
   // priceSources holds the full masked config for the Settings UI (loaded on demand).
   coinFiatMode: Record<string, boolean>
+  balanceView: BalanceView
   fiatCurrency: string
   priceSources: PriceSourcesState | null
   priceApiConfigured: boolean
@@ -120,6 +198,8 @@ interface StoreState {
   contactsAddOpen: boolean
   sendPayContactOpen: boolean
   priceSectionOpen: boolean
+  // Sidebar Allocation donut collapsed/expanded; persisted (collapsed on first launch).
+  allocationOpen: boolean
   // Transient toasts (e.g. health-failover "switched server ✓").
   toasts: Toast[]
   // Local DEX discovery consent and presence, shared by Settings and the footer chip. null = unknown.
@@ -128,11 +208,16 @@ interface StoreState {
   dexConnected: boolean
   dexLastSeen: number | null
   dexHeartbeatTtlSeconds: number
+  dexTrustedId: string | null
+  dexTrustedName: string | null
+  dexPendingPair: DexIntegrationSettings['pending_dex_pair']
 
   refresh: () => Promise<void>
   setSelected: (t: string) => void
   setActiveTab: (t: TabKey) => void
   setLightningMode: (mode: 'simple' | 'advanced') => void
+  setToolsSection: (section: ToolsSection) => void
+  setHistoryType: (t: HistoryType) => void
   fetchCoinData: (coin: string, opts?: { background?: boolean }) => Promise<void>
   loadContacts: () => Promise<void>
   setTimeframe: (tf: Timeframe) => void
@@ -155,18 +240,30 @@ interface StoreState {
   finishConnecting: () => Promise<void>
   setCoinColor: (ticker: string, hex: string) => void
   resetCoinColor: (ticker: string) => void
+  // Selective coin startup actions (Coin settings tab + wallet-list Start/Stop).
+  setAutostartAll: (on: boolean) => void
+  toggleAutostartCoin: (ticker: string) => void
+  saveCurrentRunningAsDefault: () => void
+  loadStartupCoins: () => Promise<void>
+  startCoin: (ticker: string) => Promise<void>
+  stopCoin: (ticker: string, force?: boolean) => Promise<{ blocked: boolean }>
   loadPriceSources: () => Promise<void>
   applyPriceState: (st: PriceSourcesState) => void
   toggleCoinFiat: (ticker: string) => void
   toggleAllFiatFrom: (ticker: string) => void
+  cycleBalanceView: () => void
   setFiatCurrency: (code: string) => void
   setCoinAddresses: (coin: string, rows: AddressRow[]) => void
   setContactsAddOpen: (open: boolean) => void
   setSendPayContactOpen: (open: boolean) => void
   setPriceSectionOpen: (open: boolean) => void
+  setAllocationOpen: (open: boolean) => void
   refreshDexIntegration: () => Promise<void>
   setDexIntegrationAllowed: (allowed: boolean) => Promise<void>
   setDexStartOnStartup: (enabled: boolean) => Promise<void>
+  approveDexPair: (dexId: string, dexName?: string) => Promise<void>
+  clearPendingDexPair: () => Promise<void>
+  forgetDexPair: () => Promise<void>
   pushToast: (text: string, kind?: Toast['kind']) => void
   dismissToast: (id: number) => void
 }
@@ -177,15 +274,40 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 const prefetchedHistory = new Set<string>()
 // Last-seen balance signature per coin; a change means a new tx landed, so refresh that coin's cached history.
 const lastSeenBalance = new Map<string, string>()
-// When the OPEN coin's history was last force-refreshed; re-pull on a 30s cadence as a safety net.
-let lastSelectedHistoryRefresh = 0
-const SELECTED_HISTORY_REFRESH_MS = 30_000
+// Per-coin history refresh safety net. Balance changes still force an immediate refresh; these
+// timers keep confirmation counts moving for rows whose balance no longer changes.
+const lastCoinHistoryRefresh = new Map<string, number>()
+const SELECTED_HISTORY_REFRESH_MS = 60_000
+const PENDING_HISTORY_REFRESH_MS = 60_000
+const BACKGROUND_HISTORY_REFRESH_MS = 240_000
+
+function hasPendingHistoryRows(rows: Tx[] | undefined): boolean {
+  return Boolean(rows?.some((row) => {
+    const conf = Number(row.confirmations ?? 0)
+    return Number.isFinite(conf) && conf < 6
+  }))
+}
 // When the very first refresh started — used to fail "Connecting…" after a timeout.
 let firstRefreshAt: number | null = null
 // Failover toast de-dup: last seq toasted per coin, plus a flag to seed pre-existing events silently at startup.
 let toastIdSeq = 0
 let failoverSeeded = false
 const lastFailoverSeq: Record<string, number> = {}
+// Reconcile the autostart preference from the backend exactly once per session.
+let loadedStartupOnce = false
+
+function dexStateFromSettings(settings: DexIntegrationSettings) {
+  return {
+    dexIntegrationAllowed: Boolean(settings.allow_local_dex),
+    dexStartOnStartup: Boolean(settings.start_local_dex_on_startup),
+    dexConnected: Boolean(settings.dex_connected),
+    dexLastSeen: typeof settings.dex_last_seen === 'number' ? settings.dex_last_seen : null,
+    dexHeartbeatTtlSeconds: Number(settings.heartbeat_ttl_seconds) || 45,
+    dexTrustedId: typeof settings.trusted_dex_id === 'string' && settings.trusted_dex_id ? settings.trusted_dex_id : null,
+    dexTrustedName: typeof settings.trusted_dex_name === 'string' && settings.trusted_dex_name ? settings.trusted_dex_name : null,
+    dexPendingPair: settings.pending_dex_pair ?? null,
+  }
+}
 
 export interface Toast {
   id: number
@@ -204,7 +326,9 @@ export const useStore = create<StoreState>((set, get) => ({
   lnHistory: [],
   selected: null,
   activeTab: 'history',
-  lightningMode: 'advanced',
+  lightningMode: 'simple',
+  toolsSection: 'load',
+  historyType: 'all',
   coinStates: {},
   contacts: [],
   timeframe: '24H',
@@ -217,7 +341,13 @@ export const useStore = create<StoreState>((set, get) => ({
   initialChecked: false,
   connectError: false,
   coinColorOverrides: loadCoinColorOverrides(),
+  autostartAll: loadAutostart().include_all,
+  autostartCoins: Object.fromEntries(
+    COIN_ORDER.map((t) => [t, loadAutostart().include_all || loadAutostart().coins.includes(t)]),
+  ),
+  coinStatus: {},
   coinFiatMode: loadCoinFiatMode(),
+  balanceView: 'onchain',
   fiatCurrency: getFiatCurrency(),
   priceSources: null,
   priceApiConfigured: false,
@@ -226,21 +356,34 @@ export const useStore = create<StoreState>((set, get) => ({
   contactsAddOpen: false,
   sendPayContactOpen: false,
   priceSectionOpen: false,
+  allocationOpen: getAllocationOpen(),
   toasts: [],
   dexIntegrationAllowed: null,
   dexStartOnStartup: false,
   dexConnected: false,
   dexLastSeen: null,
   dexHeartbeatTtlSeconds: 45,
+  dexTrustedId: null,
+  dexTrustedName: null,
+  dexPendingPair: null,
 
   refresh: async () => {
     if (get().loading) return
     set({ loading: true })
     if (firstRefreshAt === null) firstRefreshAt = Date.now()
+    // Reconcile the autostart preference from the backend once (it is authoritative).
+    if (!loadedStartupOnce) { loadedStartupOnce = true; void get().loadStartupCoins() }
     if (!get().initialChecked) {
       try {
         const startup = await getStartup()
-        set({ startup, connectError: false })
+        // Derive per-coin run state from the startup map, but never downgrade an optimistic
+        // 'starting' (a click) until the backend reports a terminal state.
+        const cs: Record<string, CoinRunState> = { ...get().coinStatus }
+        for (const t of Object.keys(startup.coins)) {
+          if (cs[t] === 'starting' && startup.coins[t] !== 'stopped' && startup.coins[t] !== 'ready') continue
+          cs[t] = startupToCoinStatus(startup.coins[t])
+        }
+        set({ startup, connectError: false, coinStatus: cs })
       } catch {
         if (Date.now() - (firstRefreshAt ?? Date.now()) > 120_000) set({ connectError: true })
       }
@@ -251,6 +394,18 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ setup: await getSetupStatus() })
     } catch {
       /* transient backend hiccup */
+    }
+    try {
+      const startup = await getStartup()
+      const cs: Record<string, CoinRunState> = { ...get().coinStatus }
+      for (const t of Object.keys(startup.coins)) {
+        if (startup.coins[t] === 'ready' || startup.coins[t] === 'stopped' || startup.coins[t] === 'failed') {
+          cs[t] = startupToCoinStatus(startup.coins[t])
+        }
+      }
+      set({ startup, coinStatus: cs, connectError: false })
+    } catch {
+      /* startup status is a UI hint; the per-coin probes below are still authoritative */
     }
     try {
       const [coins, portfolio, history, lnHist] = await Promise.all([
@@ -307,14 +462,27 @@ export const useStore = create<StoreState>((set, get) => ({
         if (!prefetchedHistory.has(t) || lastSeenBalance.get(t) !== sig) {
           prefetchedHistory.add(t)
           lastSeenBalance.set(t, sig)
+          lastCoinHistoryRefresh.set(t, Date.now())
           void get().fetchCoinData(t, { background: true })
         }
       }
-      // Safety net: re-pull the OPEN coin's history every 30s even if its balance signature looked unchanged.
+      // Safety net: re-pull cached per-coin history even if its balance signature looked unchanged.
+      // Confirmation counts advance without changing the balance, so every coin with a pending row
+      // gets a 60s refresh even when it is not selected. Normal background history is much slower.
       const nowMs = Date.now()
-      if (selected && portfolio?.coins?.[selected] && nowMs - lastSelectedHistoryRefresh > SELECTED_HISTORY_REFRESH_MS) {
-        lastSelectedHistoryRefresh = nowMs
-        void get().fetchCoinData(selected, { background: true })
+      for (const t of tickers) {
+        if (!portfolio?.coins?.[t]) continue
+        const rows = get().coinStates[t]?.history
+        const refreshMs = hasPendingHistoryRows(rows)
+          ? PENDING_HISTORY_REFRESH_MS
+          : t === selected
+            ? SELECTED_HISTORY_REFRESH_MS
+            : BACKGROUND_HISTORY_REFRESH_MS
+        const last = lastCoinHistoryRefresh.get(t) ?? 0
+        if (nowMs - last > refreshMs) {
+          lastCoinHistoryRefresh.set(t, nowMs)
+          void get().fetchCoinData(t, { background: true })
+        }
       }
       if (get().contacts.length === 0) void get().loadContacts()
       // Keep the lock chip + Security panel in sync with the backend's session state.
@@ -325,17 +493,24 @@ export const useStore = create<StoreState>((set, get) => ({
       if (!get().priceSources) void get().loadPriceSources()
 
       const connected: Record<string, boolean> = { ...get().connected }
+      const status: Record<string, CoinRunState> = { ...get().coinStatus }
       await Promise.all(
         tickers.map(async (ticker) => {
           try {
             const info = await getInfo(ticker)
             connected[ticker] = info.connected ?? false
+            // Backend marks a not-running daemon status:"stopped"; otherwise it answered, so it's
+            // running. A successful connected getinfo is terminal too; clear any stale optimistic
+            // 'starting' state if the original start response was missed/delayed.
+            if (info.status === 'stopped') status[ticker] = 'stopped'
+            else if (info.connected === true || status[ticker] !== 'starting') status[ticker] = 'running'
           } catch {
             connected[ticker] = false
+            if (status[ticker] !== 'starting') status[ticker] = status[ticker] ?? 'running'
           }
         }),
       )
-      set({ connected })
+      set({ connected, coinStatus: status })
     } catch (e) {
       set({
         loading: false,
@@ -358,11 +533,21 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setActiveTab: (t) => set({ activeTab: t }),
   setLightningMode: (mode) => set({ lightningMode: mode }),
+  setToolsSection: (toolsSection) => set({ toolsSection }),
+  setHistoryType: (historyType) =>
+    // Selecting a History Type also drives the balance view: Lightning -> lightning,
+    // On-chain -> coin amount; "All" leaves the balance view as the user last set it.
+    set(historyType === 'lightning'
+      ? { historyType, balanceView: 'lightning' }
+      : historyType === 'onchain'
+        ? { historyType, balanceView: 'onchain' }
+        : { historyType }),
 
   // Per-coin detail fetch with a race guard: stamp a reqId, fetch in parallel, and DISCARD
   // the result if the user switched coins or a newer request for this coin already fired.
   fetchCoinData: async (coin, opts) => {
     const reqId = Date.now()
+    lastCoinHistoryRefresh.set(coin, reqId)
     const background = opts?.background ?? false
     set((s) => ({
       coinStates: {
@@ -486,6 +671,7 @@ export const useStore = create<StoreState>((set, get) => ({
   setCoinColor: (ticker, hex) => {
     const next = { ...get().coinColorOverrides, [ticker]: hex }
     persistCoinColorOverrides(next)
+    syncCoinColorsToBackend(next)
     set({ coinColorOverrides: next })
   },
 
@@ -494,7 +680,88 @@ export const useStore = create<StoreState>((set, get) => ({
     const next = { ...get().coinColorOverrides }
     delete next[ticker]
     persistCoinColorOverrides(next)
+    syncCoinColorsToBackend(next)
     set({ coinColorOverrides: next })
+  },
+
+  // ---- selective coin startup (preference applies NEXT launch; never touches the running session) ----
+  setAutostartAll: (on) => {
+    const coins = { ...get().autostartCoins }
+    if (on) for (const t of COIN_ORDER) coins[t] = true
+    const pref: StartupCoins = on
+      ? { include_all: true, coins: [...COIN_ORDER] }
+      : { include_all: false, coins: COIN_ORDER.filter((t) => coins[t]) }
+    persistAutostart(pref)
+    syncAutostartToBackend(pref)
+    set({ autostartAll: on, autostartCoins: coins })
+  },
+
+  toggleAutostartCoin: (ticker) => {
+    const coins = { ...get().autostartCoins, [ticker]: !get().autostartCoins[ticker] }
+    if (COIN_ORDER.filter((t) => coins[t]).length === 0) return   // keep >=1 (no zero-daemon startup)
+    const pref: StartupCoins = { include_all: false, coins: COIN_ORDER.filter((t) => coins[t]) }
+    persistAutostart(pref)
+    syncAutostartToBackend(pref)
+    set({ autostartAll: false, autostartCoins: coins })
+  },
+
+  // Snapshot the coins running RIGHT NOW as the default startup set.
+  saveCurrentRunningAsDefault: () => {
+    const status = get().coinStatus
+    const running = COIN_ORDER.filter((t) => (status[t] ?? 'running') === 'running')
+    const all = running.length === COIN_ORDER.length || running.length === 0
+    const pref: StartupCoins = all
+      ? { include_all: true, coins: [...COIN_ORDER] }
+      : { include_all: false, coins: running }
+    persistAutostart(pref)
+    syncAutostartToBackend(pref)
+    set({
+      autostartAll: pref.include_all,
+      autostartCoins: Object.fromEntries(COIN_ORDER.map((t) => [t, pref.include_all || pref.coins.includes(t)])),
+    })
+    get().pushToast('Saved current coins as startup default', 'success')
+  },
+
+  // Reconcile the preference from the backend (authoritative). Called once from refresh().
+  loadStartupCoins: async () => {
+    try {
+      const pref = await getStartupCoins()
+      persistAutostart(pref)
+      set({
+        autostartAll: pref.include_all,
+        autostartCoins: Object.fromEntries(COIN_ORDER.map((t) => [t, pref.include_all || pref.coins.includes(t)])),
+      })
+    } catch {
+      /* backend not ready; the localStorage mirror seeded the initial values */
+    }
+  },
+
+  startCoin: async (ticker) => {
+    set({ coinStatus: { ...get().coinStatus, [ticker]: 'starting' } })
+    try {
+      const state = await apiStartCoin(ticker)
+      const runState: CoinRunState = state.running || state.status === 'ready' ? 'running' : state.status === 'failed' ? 'failed' : 'stopped'
+      set({ coinStatus: { ...get().coinStatus, [ticker]: runState } })
+      void get().refresh()
+    } catch (e) {
+      set({ coinStatus: { ...get().coinStatus, [ticker]: 'failed' } })
+      get().pushToast(e instanceof Error ? e.message : `Couldn't start ${ticker}`, 'warn')
+    }
+  },
+
+  // Returns {blocked:true} when the DEX is connected and force wasn't given (the UI confirms).
+  stopCoin: async (ticker, force = false) => {
+    try {
+      await apiStopCoin(ticker, force)
+      set({ coinStatus: { ...get().coinStatus, [ticker]: 'stopped' } })
+      void get().refresh()
+      return { blocked: false }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : ''
+      if (msg.includes('dex_orders_active') || msg.includes('409')) return { blocked: true }
+      get().pushToast(msg || `Couldn't stop ${ticker}`, 'warn')
+      return { blocked: false }
+    }
   },
 
   // ---- price / currency ----
@@ -555,6 +822,19 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  // Cycle the global balance view (header + rail): coin -> Lightning -> fiat (fiat only with a price API).
+  cycleBalanceView: () => {
+    const order: BalanceView[] = get().priceApiConfigured
+      ? ['onchain', 'lightning', 'fiat']
+      : ['onchain', 'lightning']
+    const cur = get().balanceView
+    const next = order[(order.indexOf(cur) + 1) % order.length] ?? 'onchain'
+    set({ balanceView: next })
+    if (next === 'fiat' && !get().priceSources?.enabled) {
+      void apiSetPriceEnabled(true).then((st) => get().applyPriceState(st)).catch(() => {})
+    }
+  },
+
   setFiatCurrency: (code) => {
     persistFiatCurrency(code)
     set({ fiatCurrency: code })
@@ -571,40 +851,44 @@ export const useStore = create<StoreState>((set, get) => ({
   setContactsAddOpen: (open) => set({ contactsAddOpen: open }),
   setSendPayContactOpen: (open) => set({ sendPayContactOpen: open }),
   setPriceSectionOpen: (open) => set({ priceSectionOpen: open }),
+  setAllocationOpen: (open) => { persistAllocationOpen(open); set({ allocationOpen: open }) },
 
   refreshDexIntegration: async () => {
     try {
       const settings = await getDexIntegration()
-      set({
-        dexIntegrationAllowed: Boolean(settings.allow_local_dex),
-        dexStartOnStartup: Boolean(settings.start_local_dex_on_startup),
-        dexConnected: Boolean(settings.dex_connected),
-        dexLastSeen: typeof settings.dex_last_seen === 'number' ? settings.dex_last_seen : null,
-        dexHeartbeatTtlSeconds: Number(settings.heartbeat_ttl_seconds) || 45,
-      })
+      set(dexStateFromSettings(settings))
     } catch {
-      set({ dexIntegrationAllowed: false, dexStartOnStartup: false, dexConnected: false, dexLastSeen: null, dexHeartbeatTtlSeconds: 45 })
+      set({
+        dexIntegrationAllowed: false,
+        dexStartOnStartup: false,
+        dexConnected: false,
+        dexLastSeen: null,
+        dexHeartbeatTtlSeconds: 45,
+        dexTrustedId: null,
+        dexTrustedName: null,
+        dexPendingPair: null,
+      })
     }
   },
   setDexIntegrationAllowed: async (allowed) => {
     const settings = await setDexIntegration(allowed)
-    set({
-      dexIntegrationAllowed: Boolean(settings.allow_local_dex),
-      dexStartOnStartup: Boolean(settings.start_local_dex_on_startup),
-      dexConnected: Boolean(settings.dex_connected),
-      dexLastSeen: typeof settings.dex_last_seen === 'number' ? settings.dex_last_seen : null,
-      dexHeartbeatTtlSeconds: Number(settings.heartbeat_ttl_seconds) || 45,
-    })
+    set(dexStateFromSettings(settings))
   },
   setDexStartOnStartup: async (enabled) => {
     const settings = await setDexIntegrationStartup(enabled)
-    set({
-      dexIntegrationAllowed: Boolean(settings.allow_local_dex),
-      dexStartOnStartup: Boolean(settings.start_local_dex_on_startup),
-      dexConnected: Boolean(settings.dex_connected),
-      dexLastSeen: typeof settings.dex_last_seen === 'number' ? settings.dex_last_seen : null,
-      dexHeartbeatTtlSeconds: Number(settings.heartbeat_ttl_seconds) || 45,
-    })
+    set(dexStateFromSettings(settings))
+  },
+  approveDexPair: async (dexId, dexName) => {
+    const settings = await approveDexPairing(dexId, dexName)
+    set(dexStateFromSettings(settings))
+  },
+  clearPendingDexPair: async () => {
+    const settings = await clearPendingDexPairing()
+    set(dexStateFromSettings(settings))
+  },
+  forgetDexPair: async () => {
+    const settings = await forgetDexPairing()
+    set(dexStateFromSettings(settings))
   },
 
   pushToast: (text, kind = 'info') => {
@@ -614,3 +898,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }))
+
+if (typeof window !== 'undefined') {
+  window.setTimeout(() => syncCoinColorsToBackend(useStore.getState().coinColorOverrides), 0)
+}

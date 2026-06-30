@@ -22,6 +22,10 @@ export interface PortfolioCoin {
   // Fiat value of this coin's balance in the chosen display currency, when the user has
   // enabled a price source and a price chain completes; null when unpriced.
   value_fiat?: string | null
+  // Lightning sendable/receivable (sats) for this coin; present only when it has open channels.
+  ln_can_send_sat?: number
+  ln_can_receive_sat?: number
+  ln_channels?: number
   // Legacy, may be absent.
   price_btc?: string | null
   value_btc?: string | null
@@ -71,7 +75,6 @@ export interface PriceSource {
 
 export interface PriceSourcesState {
   enabled: boolean
-  allow_private_hosts: boolean
   poll_seconds: number
   display: { fiatCurrency: string; displayFiat: boolean }
   sources: PriceSource[]
@@ -103,6 +106,9 @@ export interface CoinInfo {
   server?: string
   blockchain_height?: number
   version?: string
+  // Set for a coin whose daemon isn't running (user didn't start it / stopped it).
+  running?: boolean
+  status?: string
 }
 
 // Address-book + per-coin detail shapes (new backend endpoints).
@@ -246,16 +252,19 @@ export interface WalletInfo {
 }
 
 // Per-coin brand colors. Used for donut slices, row dots and tags. Tickers not present
-// here fall back to the accent color. Matched to the Blakestream pool's per-ticker chip
-// colors (Blakestream-MPOS-25.2-GO, EditAccountPage.vue) so the wallet and pool stay consistent.
+// here fall back to the accent color. Defaults are the reviewed Blakestream palette
+// used for coin accents, donut slices, buttons and rings.
 export const COIN_COLORS: Record<string, string> = {
-  BLC: '#ff9800',  // orange
-  BBTC: '#ea4335', // red
-  ELT: '#34a853',  // green
-  LIT: '#fbbc04',  // amber
-  PHO: '#4285f4',  // blue
-  UMO: '#7b61ff',  // purple
+  BLC: '#c7a470',
+  BBTC: '#b03b30',
+  ELT: '#5ea670',
+  LIT: '#b29a53',
+  PHO: '#517bbd',
+  UMO: '#6154a6',
 }
+
+// Canonical display order for the six built-in coins (rail, launch cascade, coin-settings list).
+export const COIN_ORDER = ['BLC', 'BBTC', 'ELT', 'LIT', 'PHO', 'UMO']
 
 // Effective brand color for a coin: a user override (from the store) wins, then the
 // COIN_COLORS default, then the neutral cyan accent. Consumers (rail, donut, --coin vars,
@@ -280,4 +289,13 @@ export interface DexIntegrationSettings {
   dex_connected: boolean
   dex_last_seen: number | null
   heartbeat_ttl_seconds: number
+  trusted_dex_id?: string | null
+  trusted_dex_name?: string | null
+  approved_at?: number | null
+  active_dex_id?: string | null
+  pending_dex_pair?: {
+    id: string
+    name: string
+    first_seen: number | null
+  } | null
 }

@@ -26,7 +26,8 @@ function Ensure-PythonEnv {
     }
     & $PythonBin -m pip install --upgrade pip setuptools wheel pyinstaller
     & $PythonBin -m pip install -r (Join-Path $RepoRoot "contrib\requirements\requirements.txt")
-    & $PythonBin -m pip install "cryptography>=2.6" "pycryptodomex>=3.7" "argon2-cffi>=21.3"
+    & $PythonBin -m pip install -r (Join-Path $RepoRoot "contrib\requirements\requirements-hw.txt")
+    & $PythonBin -m pip install "cryptography==48.0.1" "pycryptodomex==3.23.0" "argon2-cffi==25.1.0"
     & $PythonBin -m pip install (Join-Path $RepoRoot "blake256")
 }
 
@@ -151,7 +152,11 @@ function Stage-Backend {
 function Build-Desktop {
     Push-Location $Desktop
     try {
-        npm install
+        if (Test-Path package-lock.json) {
+            npm ci
+        } else {
+            npm install
+        }
         npm run build
         npx electron-builder --win portable nsis --x64 --config.directories.output=release
     } finally {

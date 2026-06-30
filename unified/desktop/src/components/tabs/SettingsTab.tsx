@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { NetworkSettings, WalletInfo } from '../../types'
-import { resolveCoinColor } from '../../types'
+import { resolveCoinColor, COIN_ORDER } from '../../types'
 import {
   getNetworkSettings, setServer, setFeePolicy,
   getWalletInfo, changePassword, setProxy,
 } from '../../api'
 import { useStore } from '../../store'
+import CoinIcon from '../CoinIcon'
 import { lbl, input, primaryBtn, secondaryBtn, codeBox, card, errBox } from '../uiKit'
 import {
   defaultExplorerBase, explorerBase, setExplorerBase,
@@ -24,7 +25,7 @@ const SETTINGS_TABS: { key: string; label: string; maxW: number }[] = [
   { key: 'network', label: 'Network', maxW: 960 },
   { key: 'explorer', label: 'Block explorer', maxW: 640 },
   { key: 'unit', label: 'Base unit', maxW: 420 },
-  { key: 'color', label: 'Coin color', maxW: 420 },
+  { key: 'color', label: 'Coin settings', maxW: 820 },
   { key: 'dex', label: 'DEX integration', maxW: 560 },
 ]
 
@@ -62,7 +63,7 @@ export default function SettingsTab({ coin }: { coin: string }) {
         {active === 'fee' && <FeeSection coin={coin} />}
         {active === 'explorer' && <ExplorerSection coin={coin} />}
         {active === 'unit' && <BaseUnitSection coin={coin} />}
-        {active === 'color' && <ColorSection coin={coin} />}
+        {active === 'color' && <CoinSettingsSection coin={coin} />}
         {active === 'dex' && <DexIntegrationSection />}
       </div>
     </div>
@@ -84,10 +85,15 @@ const sectionHint: React.CSSProperties = {
 function DexIntegrationSection() {
   const dexIntegrationAllowed = useStore((s) => s.dexIntegrationAllowed)
   const dexStartOnStartup = useStore((s) => s.dexStartOnStartup)
-  const dexConnected = useStore((s) => s.dexConnected)
+  const dexTrustedId = useStore((s) => s.dexTrustedId)
+  const dexTrustedName = useStore((s) => s.dexTrustedName)
+  const dexPendingPair = useStore((s) => s.dexPendingPair)
   const refreshDexIntegration = useStore((s) => s.refreshDexIntegration)
   const setDexIntegrationAllowed = useStore((s) => s.setDexIntegrationAllowed)
   const setDexStartOnStartup = useStore((s) => s.setDexStartOnStartup)
+  const approveDexPair = useStore((s) => s.approveDexPair)
+  const clearPendingDexPair = useStore((s) => s.clearPendingDexPair)
+  const forgetDexPair = useStore((s) => s.forgetDexPair)
   const allowLocalDex = dexIntegrationAllowed === true
   const [loading, setLoading] = useState(dexIntegrationAllowed === null)
   const [saving, setSaving] = useState(false)
@@ -129,6 +135,37 @@ function DexIntegrationSection() {
           ? 'DEX integration will start with the wallet.'
           : 'DEX integration will be temporary unless enabled manually.')
       })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSaving(false))
+  }
+
+  const approvePendingDex = () => {
+    if (!dexPendingPair?.id) return
+    setSaving(true)
+    setStatus(null)
+    setError(null)
+    approveDexPair(dexPendingPair.id, dexPendingPair.name)
+      .then(() => setStatus(`${dexPendingPair.name || 'Blakestream DEX'} is approved. The DEX can reconnect now.`))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSaving(false))
+  }
+
+  const clearPendingDex = () => {
+    setSaving(true)
+    setStatus(null)
+    setError(null)
+    clearPendingDexPair()
+      .then(() => setStatus('Pending DEX request cleared. The next DEX connection will ask again.'))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSaving(false))
+  }
+
+  const forgetDex = () => {
+    setSaving(true)
+    setStatus(null)
+    setError(null)
+    forgetDexPair()
+      .then(() => setStatus('Paired DEX was forgotten. The next DEX connection will require approval.'))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setSaving(false))
   }
@@ -222,20 +259,52 @@ function DexIntegrationSection() {
         </label>
         <span style={{ color: '#e6e6e6', fontWeight: 600 }}>Start DEX integration when wallet starts</span>
       </div>
-      <p style={{ ...sectionHint, marginTop: 8 }}>
-        {allowLocalDex
-          ? dexStartOnStartup
-            ? 'Blakestream DEX can discover this multiwallet on localhost after each wallet start.'
-            : 'Blakestream DEX can discover this multiwallet for this wallet session.'
-          : 'Discovery is off until you enable it.'}
-      </p>
+      {allowLocalDex && (
+        <p style={{ ...sectionHint, marginTop: 8 }}>
+          {dexStartOnStartup
+            ? 'The wallet will connect to a running local Blakestream DEX after each wallet start.'
+            : 'Blakestream DEX can discover this multiwallet for this wallet session.'}
+        </p>
+      )}
       {allowLocalDex && (
         <div style={codeBox}>http://127.0.0.1:57100/ready</div>
       )}
-      {allowLocalDex && (
-        <p style={{ margin: '8px 0 0', color: dexConnected ? '#8fe39b' : '#e6c17a', fontSize: 12 }}>
-          {dexConnected ? 'DEX is connected.' : 'Waiting for DEX connection.'}
-        </p>
+      {allowLocalDex && dexPendingPair?.id && !dexTrustedId && (
+        <div style={{
+          marginTop: 10,
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: '1px solid rgba(var(--coin-rgb),0.45)',
+          background: 'rgba(var(--coin-rgb),0.10)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          <div style={{ color: '#eef2f8', fontWeight: 700, fontSize: 12 }}>Approve local DEX connection?</div>
+          <div style={{ color: '#aeb7c2', fontSize: 12 }}>
+            {dexPendingPair.name || 'Blakestream DEX'} is asking to connect on this computer.
+            This request stays here until you approve it or clear it.
+          </div>
+          <div style={{ ...codeBox, margin: 0, fontSize: 11 }}>{dexPendingPair.id}</div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button type="button" disabled={saving} style={secondaryBtn} onClick={clearPendingDex}>
+              Clear request
+            </button>
+            <button type="button" disabled={saving} style={primaryBtn} onClick={approvePendingDex}>
+              Approve DEX
+            </button>
+          </div>
+        </div>
+      )}
+      {allowLocalDex && dexTrustedId && (
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ color: '#aeb7c2', fontSize: 12 }}>
+            Paired with <span style={{ color: '#eef2f8' }}>{dexTrustedName || 'Blakestream DEX'}</span>
+          </div>
+          <button type="button" disabled={saving} style={secondaryBtn} onClick={forgetDex}>
+            Forget paired DEX
+          </button>
+        </div>
       )}
       {status && <p style={{ margin: '8px 0 0', color: '#8fe39b', fontSize: 12 }}>{status}</p>}
       {error && <div style={{ ...errBox, marginTop: 8 }}>{error}</div>}
@@ -758,7 +827,141 @@ function BaseUnitSection({ coin }: { coin: string }) {
   )
 }
 
-// ---- 4. Coin color ----
+// ---- 4. Coin settings (startup selection + color) ----
+
+// Compact 16x16 themed checkbox (matches the DEX section's house style; retints per coin).
+function CheckBox({ checked, disabled, onChange, ariaLabel }: {
+  checked: boolean; disabled?: boolean; onChange: () => void; ariaLabel: string
+}) {
+  return (
+    <label aria-label={ariaLabel} style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16,
+      cursor: disabled ? 'default' : 'pointer', userSelect: 'none',
+    }}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={onChange}
+        style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
+      <span aria-hidden style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16,
+        borderRadius: 5,
+        border: checked ? '1px solid var(--coin)' : '1px solid rgba(255,255,255,0.18)',
+        background: checked ? 'rgba(var(--coin-rgb),0.22)' : 'rgba(255,255,255,0.04)',
+        boxShadow: checked ? '0 0 8px rgba(var(--coin-rgb),0.30)' : 'none',
+        color: '#eef2f8', fontSize: 11, lineHeight: 1,
+        transition: 'background .2s, border-color .2s, box-shadow .2s',
+      }}>{checked ? '✓' : ''}</span>
+    </label>
+  )
+}
+
+function CoinSettingsSection({ coin }: { coin: string }) {
+  // Two columns: left = global startup selection; right = this-wallet start/stop + coin color.
+  return (
+    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ flex: '1 1 340px', minWidth: 300 }}>
+        <StartupSelectionSection />
+      </div>
+      <div style={{ flex: '1 1 340px', minWidth: 300, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <ThisWalletSection coin={coin} />
+        <ColorSection coin={coin} />
+      </div>
+    </div>
+  )
+}
+
+// Left column — global "which coins auto-start at launch" preference (applies next launch).
+function StartupSelectionSection() {
+  const autostartAll = useStore((s) => s.autostartAll)
+  const autostartCoins = useStore((s) => s.autostartCoins)
+  const coins = useStore((s) => s.coins)
+  const setAutostartAll = useStore((s) => s.setAutostartAll)
+  const toggleAutostartCoin = useStore((s) => s.toggleAutostartCoin)
+  const saveCurrentRunningAsDefault = useStore((s) => s.saveCurrentRunningAsDefault)
+  const name = (t: string) => coins?.[t]?.coin_name ?? t
+
+  return (
+    <section style={card}>
+      <h3 style={sectionTitle}>Start coins at startup</h3>
+      <p style={sectionHint}>
+        Choose which coins start automatically when the wallet launches. Applies on the next launch —
+        start or stop coins for this session from the wallet list.
+        {!autostartAll && ' At least one coin must start.'}
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <CheckBox checked={autostartAll} onChange={() => setAutostartAll(!autostartAll)}
+          ariaLabel="Start all coins at startup" />
+        <span style={{ color: '#e6e6e6', fontWeight: 600 }}>Start all coins at startup</span>
+      </div>
+      <div style={{
+        marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8,
+        opacity: autostartAll ? 0.5 : 1, pointerEvents: autostartAll ? 'none' : 'auto',
+      }}>
+        {COIN_ORDER.map((t) => (
+          <div key={t} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <CheckBox checked={autostartAll || !!autostartCoins[t]} disabled={autostartAll}
+              onChange={() => toggleAutostartCoin(t)} ariaLabel={`Start ${t} at startup`} />
+            <CoinIcon ticker={t} size={20} />
+            <span style={{ color: '#e6e6e6', fontWeight: 600 }}>{t}</span>
+            <span style={{ color: '#8a929b', fontSize: 12 }}>{name(t)}</span>
+          </div>
+        ))}
+      </div>
+      <button type="button" style={{ ...secondaryBtn, marginTop: 12 }} onClick={saveCurrentRunningAsDefault}>
+        Save current running set as default startup
+      </button>
+    </section>
+  )
+}
+
+// Right column (top) — start/stop the currently-selected coin's wallet for this session.
+function ThisWalletSection({ coin }: { coin: string }) {
+  const coinStatus = useStore((s) => s.coinStatus)
+  const coins = useStore((s) => s.coins)
+  const startCoin = useStore((s) => s.startCoin)
+  const stopCoin = useStore((s) => s.stopCoin)
+  const [busy, setBusy] = useState(false)
+
+  const selStatus = coinStatus[coin] ?? 'running'
+  const runningCount = COIN_ORDER.filter((t) => (coinStatus[t] ?? 'running') === 'running').length
+  const name = (t: string) => coins?.[t]?.coin_name ?? t
+
+  const onStopSelected = async () => {
+    setBusy(true)
+    try {
+      const r = await stopCoin(coin)
+      if (r.blocked && window.confirm(
+        `${coin} is connected to the DEX. Stopping it will cancel its DEX orders. Stop anyway?`)) {
+        await stopCoin(coin, true)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section style={card}>
+      <h3 style={sectionTitle}>This wallet — {name(coin)}</h3>
+      {selStatus === 'running' ? (
+        <>
+          <p style={sectionHint}>{coin} is running.</p>
+          <button type="button" disabled={busy || runningCount <= 1}
+            style={{ ...secondaryBtn, opacity: runningCount <= 1 ? 0.5 : 1 }}
+            title={runningCount <= 1 ? "Can't stop your last running coin" : ''}
+            onClick={onStopSelected}>
+            {busy ? 'Stopping…' : 'Stop wallet'}
+          </button>
+        </>
+      ) : (
+        <>
+          <p style={sectionHint}>{coin} isn't running.</p>
+          <button type="button" disabled={selStatus === 'starting'} style={primaryBtn}
+            onClick={() => startCoin(coin)}>
+            {selStatus === 'starting' ? 'Starting…' : 'Start wallet'}
+          </button>
+        </>
+      )}
+    </section>
+  )
+}
 
 function ColorSection({ coin }: { coin: string }) {
   const overrides = useStore((s) => s.coinColorOverrides)
@@ -772,7 +975,11 @@ function ColorSection({ coin }: { coin: string }) {
     <section style={card}>
       <h3 style={sectionTitle}>Coin color</h3>
       <p style={sectionHint}>
-        Pick a custom color for {coin} — used for its accent, donut slice, buttons and rings.
+        Pick a custom color for {coin}
+        <br />
+        <span style={{ display: 'inline-block', paddingLeft: 24 }}>
+          — used for its accent, donut slice, buttons and rings.
+        </span>
       </p>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -804,6 +1011,8 @@ function ColorSection({ coin }: { coin: string }) {
 // ---- 6. Wallet information (read-only) ----
 
 function WalletInfoSection({ coin }: { coin: string }) {
+  const setActiveTab = useStore((s) => s.setActiveTab)
+  const setToolsSection = useStore((s) => s.setToolsSection)
   const [info, setInfo] = useState<WalletInfo | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -821,12 +1030,33 @@ function WalletInfoSection({ coin }: { coin: string }) {
       {value}
     </div>
   )
+  const openKeysAndSeed = () => {
+    setToolsSection('keys')
+    setActiveTab('tools')
+  }
   return (
     <section style={card}>
       <h3 style={sectionTitle}>Wallet information — {coin}</h3>
       <p style={sectionHint}>Public, watch-only identity for this coin — nothing here can spend funds.</p>
       <div style={{ fontSize: 11, color: '#4fc3f7', background: 'rgba(79,195,247,0.08)', border: '1px solid rgba(79,195,247,0.3)', borderRadius: 8, padding: '6px 10px' }}>
-        ⓘ All six coins share the same BIP39 seed. To see the seed itself, use Tools → Keys &amp; seed.
+        ⓘ All six coins share the same BIP39 seed. To see the seed itself, use Tools →{' '}
+        <button
+          type="button"
+          onClick={openKeysAndSeed}
+          style={{
+            appearance: 'none',
+            background: 'transparent',
+            border: 0,
+            padding: 0,
+            color: '#8be4ff',
+            font: 'inherit',
+            textDecoration: 'underline',
+            cursor: 'pointer',
+          }}
+        >
+          Keys &amp; seed
+        </button>
+        .
       </div>
       {err && <div style={errBox}>{err}</div>}
       {!info && !err && <p style={{ color: '#8a929b', fontSize: 12, marginTop: 12 }}>Loading…</p>}

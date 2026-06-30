@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 import electrum_ecc as ecc
 from electrum import crypto, keystore, segwit_addr
 from electrum.bip32 import BIP32Node
-from electrum.bitcoin import EncodeBase58CheckBlake
+from electrum.bitcoin import EncodeBase58Check, EncodeBase58CheckBlake
 from electrum.mnemonic import Wordlist
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,6 +66,56 @@ def _wif_prefix(coin: dict, net: str) -> int:
 
 def _coin_type(coin: dict, net: str) -> int:
     return coin["coin_type"] if net == "mainnet" else TESTNET_COIN_TYPE
+
+
+# A coin's script_type drives BOTH its BIP44 purpose AND its SLIP-132 xtype (the master-key
+# prefix Electrum infers the script type from). These three always move together. Absent
+# (the 6 built-ins) it defaults to native segwit, so their derivation is byte-identical.
+_SCRIPT = {
+    "p2pkh":       (44, "standard"),     # legacy  -> xprv  (1…)
+    "p2wpkh-p2sh": (49, "p2wpkh-p2sh"),  # wrapped -> yprv  (3…)
+    "p2wpkh":      (84, "p2wpkh"),       # native segwit -> zprv (the six built-ins)
+}
+
+
+def _script_type(coin: dict) -> str:
+    st = coin.get("script_type") or "p2wpkh"
+    if st not in _SCRIPT:
+        raise ValueError(f"unsupported script_type {st!r}")
+    return st
+
+
+def _purpose(coin: dict) -> int:
+    return _SCRIPT[_script_type(coin)][0]
+
+
+def _xtype(coin: dict) -> str:
+    return _SCRIPT[_script_type(coin)][1]
+
+
+def _xprv_net(net: str):
+    # Mainnet -> None so to_xprv falls back to constants.net (BitcoinMainnet), keeping the 6
+    # byte-identical. Testnet/regtest user coins need testnet SLIP-132 prefixes (tprv/uprv/vprv).
+    if net == "mainnet":
+        return None
+    from electrum import constants
+    return constants.BitcoinRegtest if net == "regtest" else constants.BitcoinTestnet
+
+
+def _p2pkh_prefix(coin: dict, net: str) -> int:
+    if net == "mainnet":
+        return coin["p2pkh"]
+    if net == "regtest":
+        return coin.get("regtest_p2pkh", coin["testnet_p2pkh"])
+    return coin["testnet_p2pkh"]
+
+
+def _p2sh_prefix(coin: dict, net: str) -> int:
+    if net == "mainnet":
+        return coin["p2sh"]
+    if net == "regtest":
+        return coin.get("regtest_p2sh", coin["testnet_p2sh"])
+    return coin["testnet_p2sh"]
 
 
 # --------------------------------------------------------------------------- #
@@ -114,6 +164,18 @@ def _p2wpkh_from_pubkey(pubkey: bytes, hrp: str) -> str:
     return segwit_addr.encode_segwit_address(hrp, WITNESS_V0, crypto.hash_160(pubkey))
 
 
+def _p2pkh_from_pubkey(pubkey: bytes, coin: dict, net: str) -> str:
+    # Standard (double-SHA256) base58check P2PKH, as legacy Bitcoin-fork coins use.
+    # The six Blakestream coins are native-segwit/bech32 and never reach this path.
+    return EncodeBase58Check(bytes([_p2pkh_prefix(coin, net)]) + crypto.hash_160(pubkey))
+
+
+def _p2sh_p2wpkh_from_pubkey(pubkey: bytes, coin: dict, net: str) -> str:
+    # Wrapped segwit: P2SH of the P2WPKH redeem script OP_0 <hash160(pubkey)>.
+    redeem = b"\x00\x14" + crypto.hash_160(pubkey)
+    return EncodeBase58Check(bytes([_p2sh_prefix(coin, net)]) + crypto.hash_160(redeem))
+
+
 def _pubkey_from_privkey(privkey: bytes) -> bytes:
     if len(privkey) != 32:
         raise ValueError("private key must be exactly 32 bytes")
@@ -131,6 +193,7 @@ class CoinAddressSet:
     hrp: str
     receive: List[str]
     change: List[str]
+    script_type: str = "p2wpkh"
 
 
 def _root_from_mnemonic(mnemonic: str, passphrase: str = "") -> BIP32Node:
@@ -150,12 +213,19 @@ def derive_coin(
     num_change: int = 1,
 ) -> CoinAddressSet:
     coin_type = _coin_type(coin, net)
-    hrp = _hrp(coin, net)
+    purpose = _purpose(coin)
+    script_type = _script_type(coin)
+    hrp = _hrp(coin, net) if script_type == "p2wpkh" else ""
 
     def address(change: int, index: int) -> str:
-        path = f"m/84'/{coin_type}'/{account}'/{change}/{index}"
+        path = f"m/{purpose}'/{coin_type}'/{account}'/{change}/{index}"
         node = root.subkey_at_private_derivation(path)
-        return _p2wpkh_from_pubkey(node.eckey.get_public_key_bytes(compressed=True), hrp)
+        pub = node.eckey.get_public_key_bytes(compressed=True)
+        if script_type == "p2pkh":
+            return _p2pkh_from_pubkey(pub, coin, net)
+        if script_type == "p2wpkh-p2sh":
+            return _p2sh_p2wpkh_from_pubkey(pub, coin, net)
+        return _p2wpkh_from_pubkey(pub, hrp)
 
     return CoinAddressSet(
         ticker=coin["ticker"],
@@ -163,6 +233,7 @@ def derive_coin(
         hrp=hrp,
         receive=[address(0, i) for i in range(num_receive)],
         change=[address(1, i) for i in range(num_change)],
+        script_type=script_type,
     )
 
 
@@ -190,12 +261,12 @@ def derive_all(
 # helpers the daemon orchestrator (P2) needs
 # --------------------------------------------------------------------------- #
 
-def account_derivation_path(coin_type: int, account: int = 0) -> str:
-    return f"m/84'/{coin_type}'/{account}'"
+def account_derivation_path(coin_type: int, account: int = 0, purpose: int = 84) -> str:
+    return f"m/{purpose}'/{coin_type}'/{account}'"
 
 
-def address_derivation_path(coin_type: int, account: int = 0, change: int = 0, index: int = 0) -> str:
-    return f"m/84'/{coin_type}'/{account}'/{change}/{index}"
+def address_derivation_path(coin_type: int, account: int = 0, change: int = 0, index: int = 0, purpose: int = 84) -> str:
+    return f"m/{purpose}'/{coin_type}'/{account}'/{change}/{index}"
 
 
 def provision_for_daemon(
@@ -217,7 +288,8 @@ def provision_for_daemon(
         "ticker": ticker,
         "coin_type": aset.coin_type,
         "hrp": aset.hrp,
-        "account_path": account_derivation_path(aset.coin_type, account),
+        "script_type": aset.script_type,
+        "account_path": account_derivation_path(aset.coin_type, account, _purpose(coin)),
         "receive_0": aset.receive[0],
         "change_0": aset.change[0],
     }
@@ -232,8 +304,10 @@ def derive_account_xprv(
     net: str = "mainnet",
     coins: Optional[Dict[str, dict]] = None,
 ) -> str:
-    """SLIP-132 ``zprv`` for the account node ``m/84'/<coin_type>'/<account>'`` with
-    xtype ``p2wpkh`` — ready for ``electrum daemon restore <zprv>``.
+    """SLIP-132 account extended key for ``m/<purpose>'/<coin_type>'/<account>'`` —
+    ready for ``electrum daemon restore <xkey>``. The prefix encodes the script type:
+    ``zprv`` for native segwit (the six built-ins, purpose 84'), ``yprv`` for wrapped
+    segwit (49'), ``xprv`` for legacy (44', e.g. Dogecoin); testnet emits tprv/uprv/vprv.
 
     This is the P2 provisioning primitive (approach A): the mnemonic never leaves
     the orchestrator; only this per-coin account xprv is handed to each daemon,
@@ -243,8 +317,8 @@ def derive_account_xprv(
     coin = coins[ticker]
     coin_type = _coin_type(coin, net)
     root = _root_from_mnemonic(mnemonic, passphrase)
-    node = root.subkey_at_private_derivation(account_derivation_path(coin_type, account))
-    return node._replace(xtype="p2wpkh").to_xprv()
+    node = root.subkey_at_private_derivation(account_derivation_path(coin_type, account, _purpose(coin)))
+    return node._replace(xtype=_xtype(coin)).to_xprv(net=_xprv_net(net))
 
 
 # --------------------------------------------------------------------------- #

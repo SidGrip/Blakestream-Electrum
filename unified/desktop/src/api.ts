@@ -24,6 +24,13 @@ declare global {
         get: (path: string) => Promise<ApiResult>
         post: (path: string, body: unknown) => Promise<ApiResult>
       }
+      backup?: {
+        pickSavePath: () => Promise<string | null>
+        pickOpenPath: () => Promise<string | null>
+      }
+      app?: {
+        relaunch: () => Promise<boolean>
+      }
     }
   }
 }
@@ -116,13 +123,62 @@ export function setDexIntegrationStartup(startOnStartup: boolean): Promise<DexIn
   return postJSON<DexIntegrationSettings>('/dex/integration', { start_local_dex_on_startup: startOnStartup })
 }
 
+export function approveDexPairing(dexId: string, dexName?: string): Promise<DexIntegrationSettings> {
+  return postJSON<DexIntegrationSettings>('/dex/integration', { approve_dex_id: dexId, approve_dex_name: dexName || '' })
+}
+
+export function forgetDexPairing(): Promise<DexIntegrationSettings> {
+  return postJSON<DexIntegrationSettings>('/dex/integration', { forget_paired_dex: true })
+}
+
+export function clearPendingDexPairing(): Promise<DexIntegrationSettings> {
+  return postJSON<DexIntegrationSettings>('/dex/integration', { clear_pending_dex_pair: true })
+}
+
+export function setCoinColors(colors: Record<string, string>): Promise<{ colors: Record<string, string> }> {
+  return postJSON('/settings/coin-colors', { colors })
+}
+
+// Which coins auto-start at launch. include_all => start all (today's behavior). When false,
+// only `coins` start; the rest come up "stopped" and can be started from the wallet list.
+export interface StartupCoins {
+  include_all: boolean
+  coins: string[]
+  available?: string[]
+}
+export function getStartupCoins(signal?: AbortSignal): Promise<StartupCoins> {
+  return getJSON<StartupCoins>('/settings/startup-coins', signal)
+}
+export function setStartupCoins(pref: StartupCoins): Promise<StartupCoins> {
+  return postJSON('/settings/startup-coins', { include_all: pref.include_all, coins: pref.coins })
+}
+
+// Start / stop one coin's daemon on demand (post-startup). start needs no password (the wallet
+// file is pre-provisioned, the session key is in memory). stop returns 409 when the DEX is
+// connected unless force=true (the UI confirms first).
+export interface CoinState {
+  ticker: string
+  status: string
+  running: boolean
+  loaded: boolean
+  needs_unlock: boolean
+}
+export function startCoin(coin: string): Promise<CoinState> {
+  return postJSON(`/coins/${encodeURIComponent(coin)}/start`, {})
+}
+export function stopCoin(coin: string, force = false): Promise<CoinState> {
+  return postJSON(`/coins/${encodeURIComponent(coin)}/stop`, { force })
+}
+
 // Live per-coin bring-up progress for the Connecting screen. The backend serves this
 // immediately (before the daemons finish), so the UI can light up each coin as it's ready.
+// "stopped" = a coin the user deliberately did not auto-start (excluded from all_ready).
 export interface Startup {
-  coins: Record<string, 'pending' | 'starting' | 'ready' | 'failed'>
+  coins: Record<string, 'pending' | 'starting' | 'ready' | 'failed' | 'stopped'>
   ready: number
   total: number
   all_ready: boolean
+  stopped?: string[]
 }
 
 export function getStartup(signal?: AbortSignal): Promise<Startup> {
@@ -151,6 +207,26 @@ export function createWallet(password: string): Promise<{ ok: boolean; mnemonic:
 // First-run: restore from an existing BIP39 mnemonic.
 export function restoreWallet(password: string, mnemonic: string): Promise<{ ok: boolean }> {
   return postJSON('/setup/restore', { password, mnemonic })
+}
+
+export function pickBackupSavePath(): Promise<string | null> {
+  return window.electrum?.backup?.pickSavePath?.() ?? Promise.resolve(null)
+}
+
+export function pickBackupOpenPath(): Promise<string | null> {
+  return window.electrum?.backup?.pickOpenPath?.() ?? Promise.resolve(null)
+}
+
+export function exportWalletBackup(password: string, path: string): Promise<{ ok: boolean; path: string; bytes: number; files: number }> {
+  return postJSON('/backup/export', { password, path })
+}
+
+export function restoreWalletBackup(password: string, path: string): Promise<{ ok: boolean; files: number; needs_restart?: boolean }> {
+  return postJSON('/backup/restore', { password, path })
+}
+
+export function relaunchApp(): Promise<boolean> {
+  return window.electrum?.app?.relaunch?.() ?? Promise.resolve(false)
 }
 
 // Relaunch: unlock the existing vault (decrypts the seed + provisions the daemons).
@@ -361,9 +437,6 @@ function priceOp<T = PriceSourcesState>(op: string, extra: Record<string, unknow
 
 export function setPriceEnabled(enabled: boolean): Promise<PriceSourcesState> {
   return priceOp('set_enabled', { enabled })
-}
-export function setAllowPrivateHosts(allow: boolean): Promise<PriceSourcesState> {
-  return priceOp('set_allow_private', { allow })
 }
 export function setPollSeconds(seconds: number): Promise<PriceSourcesState> {
   return priceOp('set_poll', { seconds })

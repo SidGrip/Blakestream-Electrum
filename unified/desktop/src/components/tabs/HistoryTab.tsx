@@ -61,7 +61,6 @@ function Seg<T extends string>({
   )
 }
 
-type TypeF = 'all' | 'onchain' | 'lightning'
 type DirF = 'all' | 'received' | 'sent'
 type SortBy = 'date' | 'amount'
 type Row = { ts: number; key: string; amountNum: number; kind: 'onchain' | 'lightning'; tx?: Tx; ln?: LnTx }
@@ -147,7 +146,9 @@ export default function HistoryTab({ coin }: { coin: string }) {
   // Optimistic per-txid description overrides; bridge the gap until a refresh re-pulls authoritative labels.
   const [labelOverrides, setLabelOverrides] = useState<Record<string, string>>({})
 
-  const [typeFilter, setTypeFilter] = useState<TypeF>('all')
+  // Lifted to the store so the header balance can echo the selected Type (on-chain / Lightning / all).
+  const typeFilter = useStore((s) => s.historyType)
+  const setTypeFilter = useStore((s) => s.setHistoryType)
   const [dirFilter, setDirFilter] = useState<DirF>('all')
   const [sortBy, setSortBy] = useState<SortBy>('date')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')

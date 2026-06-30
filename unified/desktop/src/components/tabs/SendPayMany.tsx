@@ -80,11 +80,14 @@ export default function SendPayMany({
             onChange={(e) => setRows((rs) => rs.map((x, k) => (k === i ? { ...x, amount: e.target.value } : x)))}
             style={{ ...input, flex: 1 }}
           />
+          {/* One recipient: keep the button's slot (amount field width stays constant) but hide it. */}
           <button
             type="button"
-            style={secondaryBtn}
+            style={{ ...secondaryBtn, ...(rows.length === 1 ? { visibility: 'hidden' } : null) }}
             onClick={() => setRows((rs) => (rs.length > 1 ? rs.filter((_, k) => k !== i) : rs))}
             disabled={rows.length === 1}
+            tabIndex={rows.length === 1 ? -1 : undefined}
+            aria-hidden={rows.length === 1 || undefined}
             title="Remove"
           >
             −
@@ -93,11 +96,11 @@ export default function SendPayMany({
       ))}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
         <button type="button" style={secondaryBtn} onClick={() => setRows((rs) => [...rs, newRow()])}>
-          + Add recipient
+          + Add
         </button>
         <input value={ptmFee} onChange={(e) => setPtmFee(e.target.value)} placeholder="fee sat/vB (optional)" style={{ ...input, width: 150 }} />
         <button type="button" style={{ ...primaryBtn, marginLeft: 'auto' }} onClick={runMany} disabled={busy || !connected} title={connected ? '' : `${coin} is offline`}>
-          {busy ? 'Working…' : 'Create transaction'}
+          {busy ? 'Working…' : 'Review'}
         </button>
       </div>
       <div style={{ color: '#8a929b', fontSize: 11, marginTop: 6 }}>

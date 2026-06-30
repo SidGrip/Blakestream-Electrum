@@ -1,10 +1,14 @@
-// Per-coin icon images (the 25.2 coin renders, downscaled to 64px), keyed by
-// ticker. Vite bundles each import and hands back the asset URL.
-import BLC from './assets/coins/BLC.png'
-import BBTC from './assets/coins/BBTC.png'
-import ELT from './assets/coins/ELT.png'
-import LIT from './assets/coins/LIT.png'
-import PHO from './assets/coins/PHO.png'
-import UMO from './assets/coins/UMO.png'
+// Per-coin icon images keyed by ticker. Vite eagerly globs assets/coins/<TICKER>.png, so any coin
+// whose icon is present is bundled automatically — there is no per-coin import to keep in sync.
+// Each glob value is the bundled asset URL (import: 'default').
+const modules = import.meta.glob('./assets/coins/*.png', {
+  eager: true,
+  import: 'default',
+}) as Record<string, string>
 
-export const COIN_ICONS: Record<string, string> = { BLC, BBTC, ELT, LIT, PHO, UMO }
+export const COIN_ICONS: Record<string, string> = Object.fromEntries(
+  Object.entries(modules).map(([path, url]) => [
+    path.split('/').pop()!.replace(/\.png$/, ''),
+    url,
+  ]),
+)

@@ -157,7 +157,8 @@ ensure_python_env() {
         export ELECTRUM_ECC_DONT_COMPILE=1
     fi
     "$PYTHON_BIN" -m pip install -r "$REPO_ROOT/contrib/requirements/requirements.txt"
-    "$PYTHON_BIN" -m pip install 'cryptography==45.0.3' 'pycryptodomex>=3.7' 'argon2-cffi>=21.3'
+    "$PYTHON_BIN" -m pip install -r "$REPO_ROOT/contrib/requirements/requirements-hw.txt"
+    "$PYTHON_BIN" -m pip install 'cryptography==48.0.1' 'pycryptodomex==3.23.0' 'argon2-cffi==25.1.0'
     "$PYTHON_BIN" -m pip install "$REPO_ROOT/blake256"
     ensure_macos_electrum_ecc_secp
 }
@@ -221,7 +222,8 @@ build_desktop() {
         macos)   builder_args=(--mac dmg zip --x64) ;;
     esac
     ( cd "$DESKTOP" \
-        && npm install \
+        && rm -rf release \
+        && if [ -f package-lock.json ]; then npm ci; else npm install; fi \
         && npm run build \
         && npx electron-builder "${builder_args[@]}" --config.directories.output=release )
 }

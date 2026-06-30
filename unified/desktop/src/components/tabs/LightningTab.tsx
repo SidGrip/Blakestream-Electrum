@@ -8,6 +8,7 @@ import { useStore } from '../../store'
 import type { LnChannel, LnInfo, LnPeer } from '../../types'
 import { Th, Td } from '../tableCells'
 import { lbl, input, primaryBtn, secondaryBtn, errBox, codeBox, card } from '../uiKit'
+import ErrorOverlay from '../ErrorOverlay'
 import { formatAmount } from '../../explorer'
 
 function errMsg(e: unknown): string {
@@ -367,12 +368,14 @@ function LightningSimplePanel({
       body: (
         <>
           <p>You are permanently closing channel <strong>{channelName}</strong>.</p>
-          <p>About <strong>{local}</strong> returns to your on-chain wallet after the close transaction confirms.</p>
+          <p>
+            About <strong style={{ color: '#f7f9fc' }}>{local}</strong> returns to your on-chain wallet after the close transaction confirms.
+          </p>
           <p style={{ textAlign: 'center' }}>
             <span style={{ display: 'block' }}>Small on-chain fees are deducted, the hub must be online.</span>
             <span style={{ display: 'block' }}>The channel cannot be reopened with the same state.</span>
           </p>
-          <p>This action cannot be undone.</p>
+          <p style={{ textAlign: 'center', color: '#f3c85a', fontSize: 16, fontWeight: 700 }}>This action cannot be undone.</p>
         </>
       ),
       confirmLabel: 'Close & Withdraw',
@@ -425,7 +428,7 @@ function LightningSimplePanel({
   )
 
   return (
-    <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: 14, position: 'relative' }}>
       {confirmDialog && (
         <ConfirmDialog
           dialog={confirmDialog}
@@ -524,7 +527,7 @@ function LightningSimplePanel({
       {!hub && (
         <div style={errBox}>No {coin} hub is configured. Open Advanced tools to connect a custom peer.</div>
       )}
-      {error && <div style={errBox}>{error}</div>}
+      <ErrorOverlay message={error} onDismiss={() => setError(null)} />
 
       <div>
         <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>Channels</div>
@@ -724,7 +727,7 @@ function ActionBox({
       {children}
       <button
         type="button"
-        style={{ ...primaryBtn, opacity: disabled ? 0.48 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
+        style={{ ...primaryBtn, alignSelf: 'flex-start', opacity: disabled ? 0.48 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
         disabled={disabled}
         onClick={onClick}
       >
@@ -1091,7 +1094,7 @@ function ChannelsSection({
         </table>
       </div>
 
-      <div style={{ borderTop: '1px solid #2e333a', marginTop: 12, paddingTop: 12 }}>
+      <div style={{ borderTop: '1px solid #2e333a', marginTop: 12, paddingTop: 12, position: 'relative' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
           <div style={{ fontSize: 12, fontWeight: 700 }}>Open a channel</div>
           {hub && (
@@ -1137,7 +1140,7 @@ function ChannelsSection({
             New channel preview: send about {coinAmount(previewSend ?? 0)} {coin}; receive about {coinAmount(pushPreview)} {coin}.
           </div>
         )}
-        {ui.error && <div style={errBox}>{ui.error}</div>}
+        <ErrorOverlay message={ui.error} onDismiss={() => patchUi(coin, { error: null })} />
         <button style={{ ...primaryBtn, marginTop: 14 }} disabled={ui.busy} onClick={() => void open()}>
           {ui.busy ? 'Opening…' : 'Open channel'}
         </button>
@@ -1168,7 +1171,7 @@ function PeersSection({ coin, peers, onChanged }: { coin: string; peers: LnPeer[
   }
 
   return (
-    <section style={{ ...card }}>
+    <section style={{ ...card, position: 'relative' }}>
         <div>
           {peers.length === 0 ? (
             <div style={{ fontSize: 12, color: '#8a929b' }}>No peers connected.</div>
@@ -1176,8 +1179,8 @@ function PeersSection({ coin, peers, onChanged }: { coin: string; peers: LnPeer[
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {peers.map((p, i) => (
                 <div key={i} style={{ ...codeBox, display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11 }}>
-                  <span>{short(p.node_id, 24)}</span>
-                  <span style={{ color: p.initialized ? '#4caf50' : '#8a929b' }}>{asStr(p.address)}</span>
+                  <span style={{ wordBreak: 'break-all', minWidth: 0 }}>{asStr(p.node_id)}</span>
+                  <span style={{ color: p.initialized ? '#4caf50' : '#8a929b', flex: '0 0 auto', whiteSpace: 'nowrap' }}>{asStr(p.address)}</span>
                 </div>
               ))}
             </div>
@@ -1186,7 +1189,7 @@ function PeersSection({ coin, peers, onChanged }: { coin: string; peers: LnPeer[
             <input style={{ ...input, flex: 1 }} value={ui.cs} onChange={(e) => patchUi(coin, { cs: e.target.value })} placeholder="connect a peer: node_id@host:port" autoComplete="off" spellCheck={false} />
             <button type="button" style={secondaryBtn} onClick={() => void add()} disabled={ui.busy}>{ui.busy ? 'Connecting…' : 'Add peer'}</button>
           </div>
-          {ui.error && <div style={errBox}>{ui.error}</div>}
+          <ErrorOverlay message={ui.error} onDismiss={() => patchUi(coin, { error: null })} />
         </div>
     </section>
   )

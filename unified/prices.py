@@ -11,16 +11,14 @@ whenever a price is absent. The valuation model follows the design doc: a per-co
 price in BTC, times one BTC/fiat rate, both optional and independent. The chosen display
 fiat can be any currency; ``btc_fiat(fiat)`` generalises the old USD-only ``btc_usd()``.
 
-Stdlib-only (``json``, ``decimal``, ``urllib``, ``socket``, ``ipaddress``). The manual
-provider needs no network; ``HttpTemplateProvider`` / ``FrankfurterFx`` fetch over HTTPS
-through an SSRF-guarded helper (https-only, private/LAN hosts blocked unless opted in).
+Stdlib-only (``json``, ``decimal``, ``urllib``). The manual
+provider needs no network; ``HttpTemplateProvider`` / ``FrankfurterFx`` fetch over HTTP/HTTPS
+through a shared helper (the configured http/https URL is fetched as-is; redirects refused, size capped).
 """
 
 from __future__ import annotations
 
-import ipaddress
 import json
-import socket
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -127,37 +125,16 @@ class _NoRedirect(_urlrequest.HTTPRedirectHandler):
         return None
 
 
-def _host_is_allowed(host: str, allow_private: bool) -> bool:
-    """True only if every resolved address is globally routable (or allow_private is set)."""
-    try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except OSError:
-        return False
-    addrs = {info[4][0] for info in infos}
-    if not addrs:
-        return False
-    for a in addrs:
-        try:
-            ip = ipaddress.ip_address(a)
-        except ValueError:
-            return False
-        if not ip.is_global and not allow_private:
-            return False
-    return True
-
-
-def safe_fetch_json(url: str, headers: Optional[dict] = None,
-                    allow_private: bool = False, timeout: float = _FETCH_TIMEOUT):
-    """GET an HTTPS URL and return parsed JSON, or None on any failure. https-only;
-    private/LAN/loopback hosts are rejected unless ``allow_private``; redirects refused;
-    response size + time capped. Never raises."""
+def safe_fetch_json(url: str, headers: Optional[dict] = None, timeout: float = _FETCH_TIMEOUT):
+    """GET a price URL and return parsed JSON, or None on any failure. The URL you configure is fetched
+    as-is — http or https, any host (only the scheme is checked). Redirects refused; size + time capped.
+    Never raises."""
     try:
         parts = urlsplit(url)
     except ValueError:
         return None
-    if parts.scheme != "https" or not parts.hostname:
-        return None
-    if not _host_is_allowed(parts.hostname, allow_private):
+    scheme, host = parts.scheme, parts.hostname
+    if scheme not in ("https", "http") or not host:
         return None
     req = _urlrequest.Request(
         url, headers={"User-Agent": "Blakestream-Electrum/1.0", **(headers or {})})
@@ -219,7 +196,6 @@ class HttpTemplateProvider(PriceProvider):
     ids: str = ""
     api_key_header: Optional[str] = None
     api_key: Optional[str] = None
-    allow_private: bool = False
 
     def _subst(self, s: str, ticker: Optional[str] = None, fiat: Optional[str] = None) -> str:
         coin = (ticker or "").upper()
@@ -236,7 +212,7 @@ class HttpTemplateProvider(PriceProvider):
         headers = {}
         if self.api_key_header and self.api_key:
             headers[self.api_key_header] = self.api_key
-        data = safe_fetch_json(url, headers, self.allow_private)
+        data = safe_fetch_json(url, headers)
         if data is None:
             return None
         return _to_decimal(_dig(data, path))
@@ -257,10 +233,9 @@ class FrankfurterFx:
 
     BASE = "https://api.frankfurter.dev/v1"
 
-    def __init__(self, ttl: float = 21600.0, *, clock=time.monotonic, allow_private: bool = False):
+    def __init__(self, ttl: float = 21600.0, *, clock=time.monotonic):
         self.ttl = ttl
         self._clock = clock
-        self.allow_private = allow_private
         self._cache: Dict[tuple, tuple] = {}
 
     def _get(self, key, compute):
@@ -281,15 +256,14 @@ class FrankfurterFx:
             return Decimal(1)
 
         def _compute():
-            data = safe_fetch_json(
-                f"{self.BASE}/latest?base={base}&symbols={quote}", allow_private=self.allow_private)
+            data = safe_fetch_json(f"{self.BASE}/latest?base={base}&symbols={quote}")
             return _to_decimal(_dig(data, f"rates.{quote}")) if data else None
 
         return self._get(("rate", base, quote), _compute)
 
     def currencies(self) -> List[str]:
         def _compute():
-            data = safe_fetch_json(f"{self.BASE}/currencies", allow_private=self.allow_private)
+            data = safe_fetch_json(f"{self.BASE}/currencies")
             return sorted(data.keys()) if isinstance(data, dict) else []
 
         return self._get(("currencies",), _compute)

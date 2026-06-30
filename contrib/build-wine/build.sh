@@ -17,6 +17,8 @@ BUILD_UID=$(/usr/bin/stat -c %u "$PROJECT_ROOT")
 info "Clearing $CONTRIB_WINE/dist..."
 rm -rf "$CONTRIB_WINE"/dist/*
 
+DOCKER_IMAGE="${ELECTRUM_WINE_IMAGE_NAME:-electrum-wine-builder-img}"
+DOCKER_CONTAINER="${ELECTRUM_WINE_CONTAINER_NAME:-electrum-wine-builder-cont}"
 
 DOCKER_BUILD_FLAGS=""
 if [ ! -z "$ELECBUILD_NOCACHE" ] ; then
@@ -31,7 +33,7 @@ fi
 info "building docker image."
 docker build \
     $DOCKER_BUILD_FLAGS \
-    -t electrum-wine-builder-img \
+    -t "$DOCKER_IMAGE" \
     "$CONTRIB_WINE"
 
 # maybe do fresh clone
@@ -63,11 +65,11 @@ if [ ! -z "$ELECBUILD_COMMIT" ] ; then  # fresh clone (reproducible build)
     fi
 fi
 docker run $DOCKER_RUN_FLAGS \
-    --name electrum-wine-builder-cont \
+    --name "$DOCKER_CONTAINER" \
     -v "$PROJECT_ROOT_OR_FRESHCLONE_ROOT":/opt/wine64/drive_c/electrum \
     --rm \
     --workdir /opt/wine64/drive_c/electrum/contrib/build-wine \
-    electrum-wine-builder-img \
+    "$DOCKER_IMAGE" \
     ./make_win.sh
 
 # make sure resulting binary location is independent of fresh_clone

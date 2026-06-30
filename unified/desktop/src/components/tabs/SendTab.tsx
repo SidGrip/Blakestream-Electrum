@@ -65,14 +65,12 @@ export default function SendTab({
   const formRef = useRef<HTMLElement>(null)
   const advRef = useRef<HTMLDivElement>(null)
   const [wrapW, setWrapW] = useState(0)
-  const [contactsW, setContactsW] = useState(0)
   const [panelMaxH, setPanelMaxH] = useState(420)
   useLayoutEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
     const measure = () => {
       setWrapW(wrap.clientWidth)
-      setContactsW(contactsRef.current?.offsetWidth ?? 0)
       // Cap contacts height at the Pay-to card's BORDER-box bottom (offsetTop+offsetHeight) when Coin Control
       // is open — NOT advRef.offsetTop, which sits a margin-bottom lower; else fill down to the viewport.
       const adv = advRef.current
@@ -195,8 +193,10 @@ export default function SendTab({
 
   const FORM_W = 480
   const GAP = 15
-  const MIN_CARD = 400
-  const contactsRight = coinContacts.length > 0 ? contactsW : 0
+  // Left-gutter width beside the always-centred form, less the gap: contacts grow to fit names up to
+  // here (ellipsis only when a name reaches the form), and hide when the window is too narrow.
+  const contactsMaxW = Math.max(0, Math.floor((wrapW - FORM_W) / 2) - GAP)
+  const showContacts = coinContacts.length > 0 && contactsMaxW >= 120
   const onChainForm = stage === 'form' && (payMode === 'many' || !isLnInvoice)
   // Coin Control toggle, reused in both send modes.
   const coinControlToggle = (
@@ -211,20 +211,12 @@ export default function SendTab({
       {advOpen ? '▾' : '▸'} Coin Control{selectedCoins.length ? ` · ${selectedCoins.length}` : ''}
     </button>
   )
-  // Pad the wrap so the centred form clears the contacts by GAP, clamped so the form never goes below
-  // MIN_CARD. Uses the FORM width ALONE so opening the wider Coin Control card never shoves the form right;
-  // Coin Control escapes this pad with marginLeft:-formPad to span full width, reaching UNDER the contacts.
-  const formPad = wrapW > 0
-    ? Math.max(0, Math.min(2 * (contactsRight + GAP) - wrapW + FORM_W, wrapW - MIN_CARD))
-    : 0
-
   return (
-    <div ref={wrapRef} style={{ position: 'relative', perspective: 1400, flex: 1, minHeight: 0, paddingLeft: formPad, transition: 'padding-left 0.18s ease' }}>
-      {/* Contacts card, absolutely positioned left so it never shifts the centred form; the list stretches
-          down (panelMaxH) and stops at the Coin Control card's top. */}
-      {coinContacts.length > 0 && (
+    <div ref={wrapRef} style={{ position: 'relative', perspective: 1400, flex: 1, minHeight: 0 }}>
+      {/* Contacts: absolute-left so it never shifts the centred form; list scrolls within panelMaxH. */}
+      {showContacts && (
         <div ref={contactsRef} style={{ position: 'absolute', left: 0, top: 0, zIndex: 2 }}>
-            <div style={{ ...card, width: 'fit-content', minWidth: 150, maxWidth: 240, padding: 12, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: panelMaxH }}>
+            <div style={{ ...card, width: 'fit-content', maxWidth: contactsMaxW, boxSizing: 'border-box', padding: 12, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: panelMaxH }}>
               <label style={{ ...lbl, marginTop: 0, marginBottom: 0, flex: '0 0 auto' }}>Pay to a contact</label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto', flex: '1 1 auto', minHeight: 0 }}>
                 {coinContacts.map((c) => (
@@ -232,7 +224,7 @@ export default function SendTab({
                     key={c.id}
                     type="button"
                     style={{
-                      flex: '0 0 auto',
+                      flex: '0 0 auto', width: '100%', boxSizing: 'border-box',
                       padding: '7px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #2e333a',
                       background: '#1a1d21', color: '#cfd4da', textAlign: 'left', cursor: 'pointer',
                       whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
@@ -240,7 +232,7 @@ export default function SendTab({
                     onClick={() => setAddress(c.address)}
                     title={c.address}
                   >
-                    {c.label || c.address.slice(0, 14) + '…'}
+                    {c.label || c.address}
                   </button>
                 ))}
               </div>
@@ -360,7 +352,7 @@ export default function SendTab({
                       style={input}
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
-                      placeholder="e.g. rent, savings…"
+                      placeholder="e.g. loot, gas, skins…"
                       autoComplete="off"
                     />
                     {selectedCoins.length > 0 && (
@@ -393,10 +385,9 @@ export default function SendTab({
         <ErrorOverlay tone="success" message={success} onDismiss={() => setSuccess(null)} />
       </section>
 
-      {/* Coin Control = full-width card below the Send card, reaching left UNDER the contacts and never
-          shifting the form. advRef lets the contacts panel measure where it starts (null -> 0 when closed). */}
+      {/* Coin Control: full-width block below the form, under the contacts. */}
       {onChainForm && (
-        <div ref={advRef} style={{ marginLeft: -formPad, transition: 'margin-left 0.18s ease' }}>
+        <div ref={advRef}>
           <SendAdvanced
             open={advOpen}
             coin={coin}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../../store'
 import {
-  getFxCurrencies, setAllowPrivateHosts, setPriceEnabled, setPollSeconds,
+  getFxCurrencies, setPriceEnabled, setPollSeconds,
   addPriceSource, updatePriceSource, removePriceSource, setPriceSourceEnabled,
   reorderPriceSources, testPriceSource, type PriceSourceSpec,
 } from '../../api'
@@ -273,7 +273,6 @@ export default function PriceSection({ coin }: { coin: string }) {
     window.setTimeout(() => setApplyMsg(''), 2500)
   }
 
-  const allowPrivate = ps?.allow_private_hosts ?? false
   const fiatOptions = currencies.length ? currencies : [fiatCurrency, 'USD', 'EUR', 'GBP']
 
   return (
@@ -331,15 +330,6 @@ export default function PriceSection({ coin }: { coin: string }) {
           </div>
         )
       })}
-
-      {/* Security opt-in */}
-      <div style={{ borderTop: divider, marginTop: 14, paddingTop: 12 }}>
-        <Check on={allowPrivate} onChange={(v) => run(setAllowPrivateHosts(v))} label="Allow LAN / private hosts" />
-        <p style={{ ...sectionHint, margin: '6px 0 0' }}>
-          Off by default, sources must be public HTTPS. Turn on only to use your own pool / explorer /
-          API on the local network (still HTTPS-only).
-        </p>
-      </div>
       </div>
     </section>
   )

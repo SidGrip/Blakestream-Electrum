@@ -27,49 +27,13 @@ import signal
 import socket
 import threading
 import time
-import traceback
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from unified import contacts, provisioning, vault
+from unified import backup as wallet_backup, contacts, provisioning, vault
+from unified.orchestrator import DexOrdersActiveError
 
 DEFAULT_API_PORT = 57100
-
-_API_DEBUG_PLAIN_LOG_LOCK = threading.Lock()
-
-
-def _api_debug_plain_log(event: str, **fields) -> None:
-    """Unsafe plaintext API test log.
-
-    Mirrors orchestrator._debug_plain_log so endpoint-level request/response data
-    can be correlated with daemon RPC logs during local Lightning testing.
-    """
-    if os.environ.get("BLAKESTREAM_WALLET_DEBUG_PLAIN") != "1":
-        return
-    path = os.environ.get("BLAKESTREAM_WALLET_DEBUG_LOG") or os.path.join(
-        os.path.expanduser("~"), ".config", "blakestream-electrum", "wallet-debug-plain-unsafe.log")
-    try:
-        max_chars = max(1000, int(os.environ.get("BLAKESTREAM_WALLET_DEBUG_MAX_CHARS") or "20000"))
-    except ValueError:
-        max_chars = 20000
-    row = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "pid": os.getpid(),
-        "thread": threading.get_ident(),
-        "event": event,
-        **fields,
-    }
-    try:
-        text = json.dumps(row, sort_keys=True, default=str)
-        if len(text) > max_chars:
-            text = text[:max_chars] + "...<truncated>"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with _API_DEBUG_PLAIN_LOG_LOCK:
-            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "a", encoding="utf-8") as f:
-                f.write(text + "\n")
-    except Exception:
-        pass
 
 
 def _jsonable(obj):
@@ -145,14 +109,6 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
         def log_message(self, *args):
             pass  # quiet
 
-        def _debug_request_context(self):
-            return {
-                "path": self.path,
-                "command": self.command,
-                "client_address": self.client_address,
-                "headers": dict(self.headers.items()),
-            }
-
         def _host_ok(self) -> bool:
             # Defence against DNS-rebinding: a browser that rebinds a hostname to
             # 127.0.0.1 still sends that hostname in Host. Require a loopback Host (the
@@ -190,11 +146,14 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
 
         def _send(self, code, payload):
             body = json.dumps(_jsonable(payload)).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _read_json_body(self, max_bytes=64 * 1024):
             try:
@@ -246,19 +205,24 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                          if token else "")
                 self._send(200, {"proof": proof})
                 return
-            # Local DEX discovery. It is intentionally token-free so the DEX can find a
-            # running wallet, but default-off and Host/loopback gated. The payload contains
-            # no balances, addresses, seed material, xpubs, RPC passwords, or signing API.
+            # Local DEX discovery. It is default-off and Host/loopback gated. Unknown DEX
+            # instances get a wallet-side approval prompt and no session token; only the
+            # approved DEX receives import data for the local session.
             if path_only == "ready":
                 if not self._client_loopback_ok():
                     self._send(403, {"error": "forbidden client"})
                     return
-                status = orchestrator.dex_ready_status()
+                from urllib.parse import parse_qs
+                query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                dex_instance_id = (query.get("dex_instance_id") or [""])[0]
+                dex_name = (query.get("dex_name") or [""])[0]
+                status = orchestrator.dex_ready_status(dex_instance_id, dex_name)
+                http_status = int(status.pop("_http_status", 200) or 200)
                 if not status.get("integration_allowed"):
                     self._send(403, {"integration_allowed": False,
                                      "error": "local DEX integration disabled"})
                     return
-                self._send(200, status)
+                self._send(http_status, status)
                 return
             if not self._check_auth():
                 self._send(401, {"error": "unauthorized"})
@@ -334,6 +298,10 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                         self._send(200, orchestrator.wallet_info(coin))
                     else:
                         self._send(200, {"mpk": orchestrator.master_pubkey(coin)})
+                elif parts == ["settings", "coin-colors"]:
+                    self._send(200, orchestrator.coin_colors())
+                elif parts == ["settings", "startup-coins"]:
+                    self._send(200, orchestrator.autostart_settings())
                 elif len(parts) == 2 and parts[0] == "settings":
                     self._send(200, orchestrator.network_settings(parts[1].upper()))
                 elif parts == ["price-sources"]:
@@ -364,14 +332,57 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                 self._send(403, {"error": "forbidden host"})
                 return
             parts = [p for p in self.path.split("?")[0].strip("/").split("/") if p]
-            # Token-free DEX presence heartbeat. This is not an auth grant and carries no
-            # commands or secrets; it only lets the wallet UI show whether a local DEX that
-            # already imported this wallet is still alive.
+            # DEX presence heartbeat. It is not a signing route, but it must still be
+            # bound to the approved DEX identity/session so a second local process cannot
+            # make the wallet UI believe it is connected.
             if parts == ["dex", "heartbeat"]:
-                status = orchestrator.record_dex_heartbeat()
+                if not self._client_loopback_ok():
+                    self._send(403, {"error": "forbidden client"})
+                    return
+                data = self._read_json_body(max_bytes=4 * 1024)
+                if data is None:
+                    return
+                allowed_keys = {"dex_instance_id", "dex_session_token"}
+                extra_keys = sorted(set(data) - allowed_keys)
+                if extra_keys:
+                    self._send(400, {"error": f"unexpected field(s): {', '.join(extra_keys)}"})
+                    return
+                missing_keys = [k for k in ("dex_instance_id", "dex_session_token") if data.get(k) in (None, "")]
+                if missing_keys:
+                    self._send(400, {"error": f"missing field(s): {', '.join(missing_keys)}"})
+                    return
+                try:
+                    status = orchestrator.record_dex_heartbeat(
+                        data.get("dex_instance_id"),
+                        data.get("dex_session_token"),
+                    )
+                except PermissionError as e:
+                    self._send(403, {"error": str(e)[:200]})
+                    return
                 if not status.get("allow_local_dex"):
                     self._send(403, {**status, "error": "local DEX integration disabled"})
                     return
+                self._send(200, status)
+                return
+            # Pairing cancel is token-free because the DEX has not been approved yet.
+            # It may only clear the pending request for the exact DEX identity supplied
+            # by that same loopback DEX instance; it cannot clear another pending DEX.
+            if parts == ["dex", "cancel-pairing"]:
+                if not self._client_loopback_ok():
+                    self._send(403, {"error": "forbidden client"})
+                    return
+                data = self._read_json_body(max_bytes=4 * 1024)
+                if data is None:
+                    return
+                allowed_keys = {"dex_instance_id"}
+                extra_keys = sorted(set(data) - allowed_keys)
+                if extra_keys:
+                    self._send(400, {"error": f"unexpected field(s): {', '.join(extra_keys)}"})
+                    return
+                if data.get("dex_instance_id") in (None, ""):
+                    self._send(400, {"error": "missing field(s): dex_instance_id"})
+                    return
+                status = orchestrator.cancel_pending_dex_pairing(data.get("dex_instance_id"))
                 self._send(200, status)
                 return
             # Token-free local DEX funding route. It is intentionally outside the
@@ -385,13 +396,13 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                 data = self._read_json_body(max_bytes=16 * 1024)
                 if data is None:
                     return
-                allowed_keys = {"coin", "address", "amount", "dex_session_token", "rpc_password",
-                                "swap_id", "order_id"}
+                allowed_keys = {"coin", "address", "amount", "dex_instance_id", "dex_session_token", "rpc_password",
+                                "swap_id", "order_id", "description"}
                 extra_keys = sorted(set(data) - allowed_keys)
                 if extra_keys:
                     self._send(400, {"error": f"unexpected field(s): {', '.join(extra_keys)}"})
                     return
-                missing_keys = [k for k in ("coin", "address", "amount", "dex_session_token", "rpc_password")
+                missing_keys = [k for k in ("coin", "address", "amount", "dex_instance_id", "dex_session_token", "rpc_password")
                                 if data.get(k) in (None, "")]
                 if missing_keys:
                     self._send(400, {"error": f"missing field(s): {', '.join(missing_keys)}"})
@@ -403,8 +414,10 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                         data.get("amount"),
                         data.get("dex_session_token"),
                         data.get("rpc_password"),
+                        data.get("dex_instance_id"),
                         swap_id=data.get("swap_id"),
                         order_id=data.get("order_id"),
+                        description=data.get("description"),
                     )
                 except PermissionError as e:
                     self._send(403, {"error": str(e)[:200]})
@@ -421,95 +434,50 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                 self._send(200, result)
                 return
             if parts == ["dex", "pay-lightning"]:
-                request_context = self._debug_request_context()
-                _api_debug_plain_log("api_dex_pay_lightning_enter", **request_context)
                 if not self._client_loopback_ok():
-                    _api_debug_plain_log("api_dex_pay_lightning_forbidden_client", **request_context)
                     self._send(403, {"error": "forbidden client"})
                     return
                 data = self._read_json_body(max_bytes=64 * 1024)
                 if data is None:
-                    _api_debug_plain_log("api_dex_pay_lightning_body_invalid", **request_context)
                     return
-                _api_debug_plain_log("api_dex_pay_lightning_body", body=data, **request_context)
-                allowed_keys = {"coin", "invoice", "dex_session_token", "rpc_password",
-                                "timeout", "max_cltv", "max_fee_msat", "swap_id", "order_id"}
+                allowed_keys = {"coin", "invoice", "dex_instance_id", "dex_session_token", "rpc_password",
+                                "timeout", "max_cltv", "max_fee_msat", "swap_id", "order_id",
+                                "description"}
                 extra_keys = sorted(set(data) - allowed_keys)
                 if extra_keys:
-                    _api_debug_plain_log("api_dex_pay_lightning_extra_keys",
-                                         body=data, extra_keys=extra_keys, **request_context)
                     self._send(400, {"error": f"unexpected field(s): {', '.join(extra_keys)}"})
                     return
-                missing_keys = [k for k in ("coin", "invoice", "dex_session_token", "rpc_password")
+                missing_keys = [k for k in ("coin", "invoice", "dex_instance_id", "dex_session_token", "rpc_password")
                                 if data.get(k) in (None, "")]
                 if missing_keys:
-                    _api_debug_plain_log("api_dex_pay_lightning_missing_keys",
-                                         body=data, missing_keys=missing_keys, **request_context)
                     self._send(400, {"error": f"missing field(s): {', '.join(missing_keys)}"})
                     return
-                started = time.monotonic()
                 try:
-                    _api_debug_plain_log("api_dex_pay_lightning_orchestrator_start",
-                                         body=data, **request_context)
                     result = orchestrator.dex_pay_lightning(
                         data.get("coin"),
                         data.get("invoice"),
                         data.get("dex_session_token"),
                         data.get("rpc_password"),
+                        data.get("dex_instance_id"),
                         timeout=data.get("timeout"),
                         max_cltv=data.get("max_cltv"),
                         max_fee_msat=data.get("max_fee_msat"),
                         swap_id=data.get("swap_id"),
                         order_id=data.get("order_id"),
+                        description=data.get("description"),
                     )
                 except PermissionError as e:
-                    _api_debug_plain_log("api_dex_pay_lightning_permission_error",
-                                         body=data,
-                                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                                         error=repr(e),
-                                         traceback=traceback.format_exc(),
-                                         **request_context)
                     self._send(403, {"error": str(e)[:200]})
                     return
                 except KeyError as e:
-                    _api_debug_plain_log("api_dex_pay_lightning_key_error",
-                                         body=data,
-                                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                                         error=repr(e),
-                                         traceback=traceback.format_exc(),
-                                         **request_context)
                     self._send(404, {"error": f"unknown coin {e}"})
                     return
                 except ValueError as e:
-                    _api_debug_plain_log("api_dex_pay_lightning_value_error",
-                                         body=data,
-                                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                                         error=repr(e),
-                                         traceback=traceback.format_exc(),
-                                         **request_context)
                     self._send(400, {"error": str(e)[:200]})
                     return
                 except Exception as e:
-                    _api_debug_plain_log("api_dex_pay_lightning_exception",
-                                         body=data,
-                                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                                         error=repr(e),
-                                         traceback=traceback.format_exc(),
-                                         **request_context)
                     self._send(500, {"error": str(e)[:300]})
                     return
-                inner_result = result.get("result") if isinstance(result, dict) else None
-                if isinstance(inner_result, dict) and inner_result.get("success") is False:
-                    _api_debug_plain_log("api_dex_pay_lightning_payment_failed",
-                                         body=data,
-                                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                                         result=result,
-                                         **request_context)
-                _api_debug_plain_log("api_dex_pay_lightning_success",
-                                     body=data,
-                                     elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                                     result=result,
-                                     **request_context)
                 self._send(200, result)
                 return
             if not self._check_auth():
@@ -631,13 +599,97 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                         orchestrator.set_session_keys(wallet_pws, contacts_key)
                         del mnemonic
                     self._send(200, {"ok": True, "locked": False})
+                elif parts == ["backup", "export"]:
+                    pw = data.get("password")
+                    path = str(data.get("path") or "").strip()
+                    if not pw or not path:
+                        self._send(400, {"error": "password and backup path required"}); return
+                    if not (vault_path and vault.vault_exists(vault_path)):
+                        self._send(400, {"error": "no wallet vault to back up"}); return
+                    if _pw_attempts_blocked():
+                        self._send(429, {"error": "too many attempts — wait a minute and try again"}); return
+                    with setup_lock:
+                        try:
+                            mnemonic = vault.unlock_vault(vault_path, pw)
+                        except vault.BadPassword:
+                            _pw_record_failure(); time.sleep(0.5)
+                            self._send(401, {"error": "wrong password"}); return
+                        except ValueError as e:
+                            self._send(400, {"error": str(e)[:120]}); return
+                        del mnemonic
+                        try:
+                            result = wallet_backup.create_backup(orchestrator.datadirs_root, path, str(pw))
+                        except wallet_backup.BackupError as e:
+                            self._send(400, {"error": str(e)[:160]}); return
+                        except Exception as e:
+                            self._send(500, {"error": f"backup failed: {str(e)[:120]}"}); return
+                    self._send(200, result)
+                elif parts == ["backup", "restore"]:
+                    pw = data.get("password")
+                    path = str(data.get("path") or "").strip()
+                    if not pw or not path:
+                        self._send(400, {"error": "password and backup path required"}); return
+                    if vault_path and vault.vault_exists(vault_path):
+                        self._send(409, {"error": "wallet already exists; unlock it or back up and remove existing wallet data before restoring"})
+                        return
+                    with setup_lock:
+                        try:
+                            result = wallet_backup.restore_backup(path, orchestrator.datadirs_root, str(pw))
+                        except wallet_backup.BackupError as e:
+                            self._send(400, {"error": str(e)[:160]}); return
+                        except Exception as e:
+                            self._send(500, {"error": f"restore failed: {str(e)[:120]}"}); return
+                        # Restored configs/wallet files should be loaded by a fresh backend process.
+                        try:
+                            orchestrator.stop_all()
+                        except Exception:
+                            pass
+                    result["needs_restart"] = True
+                    self._send(200, result)
                 elif parts == ["dex", "integration"]:
                     status = orchestrator.dex_integration_settings()
                     if "allow_local_dex" in data:
                         status = orchestrator.set_dex_integration(data.get("allow_local_dex"))
                     if "start_local_dex_on_startup" in data:
                         status = orchestrator.set_dex_start_on_startup(data.get("start_local_dex_on_startup"))
+                    if "approve_dex_id" in data:
+                        try:
+                            status = orchestrator.approve_dex_pairing(
+                                data.get("approve_dex_id"),
+                                data.get("approve_dex_name"),
+                            )
+                        except ValueError as e:
+                            self._send(400, {"error": str(e)[:120]}); return
+                    if data.get("clear_pending_dex_pair"):
+                        status = orchestrator.clear_pending_dex_pairing()
+                    if data.get("forget_paired_dex"):
+                        status = orchestrator.forget_dex_pairing()
                     self._send(200, status)
+                elif parts == ["settings", "coin-colors"]:
+                    colors = data.get("colors")
+                    if not isinstance(colors, dict):
+                        self._send(400, {"error": "colors object required"})
+                        return
+                    self._send(200, orchestrator.set_coin_colors(colors))
+                elif parts == ["settings", "startup-coins"]:
+                    if "include_all" not in data and "coins" not in data:
+                        self._send(400, {"error": "include_all and/or coins required"}); return
+                    self._send(200, orchestrator.set_autostart(
+                        data.get("include_all", True), data.get("coins") or []))
+                elif len(parts) == 3 and parts[0] == "coins" and parts[2] in ("start", "stop"):
+                    coin = parts[1].upper()
+                    if coin not in orchestrator.daemons:
+                        self._send(404, {"error": f"unknown coin {coin}"}); return
+                    try:
+                        if parts[2] == "start":
+                            self._send(200, orchestrator.start_coin(coin))
+                        else:
+                            self._send(200, orchestrator.stop_coin(coin, force=bool(data.get("force"))))
+                    except DexOrdersActiveError:
+                        self._send(409, {"error": "dex_orders_active",
+                                         "message": f"{coin} is connected to the DEX — confirm to stop it."})
+                    except Exception as e:
+                        self._send(500, {"error": str(e)[:300]})
                 elif parts == ["wallet", "change-password"]:
                     cur = data.get("current_password")
                     new = data.get("new_password")
@@ -964,8 +1016,6 @@ def make_handler(orchestrator, vault_path=None, token=None, shutdown_cb=None):
                     try:
                         if op == "set_enabled":
                             self._send(200, orchestrator.set_price_enabled(data.get("enabled")))
-                        elif op == "set_allow_private":
-                            self._send(200, orchestrator.set_allow_private_hosts(data.get("allow")))
                         elif op == "set_poll":
                             self._send(200, orchestrator.set_poll_seconds(data.get("seconds")))
                         elif op == "set_display":
@@ -1083,6 +1133,10 @@ def _reap_foreign_supervisor(port: int) -> None:
 
 def serve(orchestrator, host: str = "127.0.0.1", port: int = DEFAULT_API_PORT,
           vault_path=None, token=None):
+    try:
+        orchestrator.api_port = int(port)
+    except Exception:
+        pass
     holder = {}
 
     def _shutdown():

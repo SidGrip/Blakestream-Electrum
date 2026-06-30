@@ -2,21 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { getSetupStatus, getUnlockProgress, type UnlockProgress } from '../api'
 import CoinIcon from './CoinIcon'
-import { resolveCoinColor } from '../types'
+import { resolveCoinColor, COIN_ORDER } from '../types'
 import './setup.css'
 
-// Fixed display order so the row is stable while coins light up.
-const COIN_ORDER = ['BLC', 'BBTC', 'ELT', 'LIT', 'PHO', 'UMO']
 const REVEAL_MS = 150 // pace between coins lighting up
 const HOLD_MS = 1000 // hold once all lit before onboarding (first-run only)
 
 type ProgressDetail = NonNullable<UnlockProgress['detail']>[string]
 
 function orderOf(coins: Record<string, string>): string[] {
+  // Only coins actually starting this session — exclude any the user chose not to start
+  // ("stopped"), so the connecting screen shows just the selected wallets, not all six.
   return [
     ...COIN_ORDER.filter((t) => t in coins),
     ...Object.keys(coins).filter((t) => !COIN_ORDER.includes(t)),
-  ]
+  ].filter((t) => coins[t] !== 'stopped')
 }
 
 function shortServer(server: string | null | undefined): string {
@@ -112,6 +112,13 @@ export default function LaunchScreen({ failed }: { failed: boolean }) {
     return () => clearInterval(id)
   }, [failed])
 
+  // The 150ms cascade only paces the CONNECTING phase (coins land one at a time). The instant
+  // every wallet is ready, light the whole row at once — otherwise the password prompt (gated on
+  // all_ready) appears beside coins still mid-fade-in, looking like they're still loading.
+  useEffect(() => {
+    if (startup?.all_ready) setRevealed(orderOf(startup.coins ?? {}))
+  }, [startup?.all_ready])
+
   // First-run only: once every ready coin is lit, hold then hand off to onboarding. One-shot
   // (ref-guarded), NO cleanup so poll re-renders can't cancel it. Unlock path waits for password.
   useEffect(() => {
@@ -199,7 +206,8 @@ export default function LaunchScreen({ failed }: { failed: boolean }) {
 
   // Once all six are up and a vault exists, prompt for the password (heading carries the state).
   const awaitingPassword = !busy && allReady && !!vaultExists
-  // No subtitle — the per-coin list below already shows each coin's live progress.
+  // No subtitle — the per-coin list below already shows each coin's live progress (only the
+  // coins being started this session are shown; the rest are startable from the wallet list).
   const statusLine = ''
   const slowest = busy ? slowestProgress(order, progress) : undefined
 
@@ -294,7 +302,7 @@ export default function LaunchScreen({ failed }: { failed: boolean }) {
                 className="launch-progress-details"
                 style={{
                   marginTop: 16,
-                  width: 300,
+                  width: 'min(440px, 100%)',
                   marginLeft: 'auto',
                   marginRight: 'auto',
                   border: '1px solid rgba(255,255,255,0.09)',
@@ -318,16 +326,25 @@ export default function LaunchScreen({ failed }: { failed: boolean }) {
                     fontWeight: 700,
                   }}
                 >
-                  <span style={{ flex: '1 1 auto', minWidth: 0 }}>{progressLabel(slowest)}</span>
+                  <span
+                    style={{
+                      flex: '1 1 auto',
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {progressLabel(slowest)}
+                  </span>
                   <span
                     style={{
                       marginLeft: 'auto',
+                      flex: '0 0 auto',
                       color: progressColor(slowest),
                       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                       fontSize: 11,
                       fontWeight: 600,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
                   >

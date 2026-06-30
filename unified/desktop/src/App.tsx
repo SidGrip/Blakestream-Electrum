@@ -23,7 +23,11 @@ export default function App() {
   // The effective brand color of the focused coin (user override wins). Depending the
   // retint effect on this hex means it re-runs both when the selection changes AND when
   // the user picks a new color for the current coin — so the picker retints live.
-  const selectedHex = selected ? resolveCoinColor(coinColorOverrides, selected) : '#4fc3f7'
+  // Only the dashboard follows a coin color; the launch + setup screens stay on the neutral
+  // teal accent (otherwise they'd flash to BLC's color the moment the daemons report).
+  const selectedHex = initialChecked && onboarded && selected
+    ? resolveCoinColor(coinColorOverrides, selected)
+    : '#4fc3f7'
 
   useEffect(() => {
     // Initial fetch + 8s polling loop; clean up on unmount.
@@ -62,7 +66,7 @@ export default function App() {
       <aside className="rail">
         <div
           style={{
-            padding: '16px 16px 8px',
+            padding: '16px 16px 10px',
             borderBottom: '1px solid rgba(255,255,255,0.06)',
             fontSize: 15,
             fontWeight: 700,

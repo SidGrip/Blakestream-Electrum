@@ -1,7 +1,7 @@
 {
   "name": "blakestream-electrum",
   "version": "0.25.2",
-  "description": "Blakestream Wallet \u2014 multiwallet desktop dashboard for the Blakestream 6-coin family",
+  "description": "Blakestream Wallet - multiwallet desktop dashboard for the Blakestream 6-coin family",
   "private": true,
   "author": "Blakestream",
   "license": "MIT",
@@ -26,8 +26,8 @@
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
+    "electron": "^42.5.1",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.4.0",
     "vite": "^5.2.0"
   },
@@ -62,10 +62,13 @@
       "target": [
         "portable",
         "nsis"
-      ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      ]
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-${arch}-portable.${ext}"
     },
     "nsis": {
+      "artifactName": "${productName}-${version}-${arch}-setup.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true

@@ -56,7 +56,23 @@ def _servers(tickers):
     return out
 
 
-def _orchestrator(tickers, args) -> Orchestrator:
+def _coins_and_ports():
+    """The multiwallet manages every coin in coins.json. The six built-ins keep their fixed
+    ports (57101-57106); any additional coin auto-gets the next free port at 57107+. The default
+    6-coin coins.json yields exactly DEFAULT_RPC_PORTS, so this is a no-op for the standard build."""
+    coins = provisioning.load_coins()
+    ports = dict(DEFAULT_RPC_PORTS)
+    nxt = max(ports.values(), default=57100) + 1
+    for t in coins:
+        if t not in ports:
+            ports[t] = nxt
+            nxt += 1
+    # canonical six first (their UI order), then any extras in coins.json order
+    tickers = [t for t in DEFAULT_RPC_PORTS if t in coins] + [t for t in coins if t not in DEFAULT_RPC_PORTS]
+    return coins, ports, tickers
+
+
+def _orchestrator(tickers, args, *, ports=None, coins=None) -> Orchestrator:
     binaries = None
     if args.backend_dir:  # packaged: standalone per-coin daemon binaries
         binaries = {t: os.path.join(args.backend_dir, f"electrum-{t.lower()}",
@@ -66,6 +82,8 @@ def _orchestrator(tickers, args) -> Orchestrator:
         workspaces_root=args.workspaces or "",
         datadirs_root=args.datadirs,
         servers=_servers(tickers),
+        coins=coins,
+        ports=ports,
         binaries=binaries,
     )
 
@@ -142,8 +160,8 @@ def cmd_single(args):
 
 
 def cmd_multi(args):
-    tickers = list(DEFAULT_RPC_PORTS)
-    orch = _orchestrator(tickers, args)
+    coins, ports, tickers = _coins_and_ports()
+    orch = _orchestrator(tickers, args, ports=ports, coins=coins)
     mnemonic = _acquire_mnemonic(args, shared=True)
     if args.serve:
         # Serve-first: bring the six daemons up in the BACKGROUND so the API (and the

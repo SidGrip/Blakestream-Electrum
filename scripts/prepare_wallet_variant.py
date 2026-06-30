@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
 import shutil
+import subprocess
+import time
 from pathlib import Path
 
 
@@ -22,6 +25,11 @@ COPY_IGNORE_NAMES = {
     "__pycache__",
     "Electrum.egg-info",
 }
+
+REQUIRED_SUBMODULE_PATHS = (
+    "electrum/locale",
+    "electrum/plugins/keepkey/keepkeylib",
+)
 
 
 def load_coin(repo_root: Path, coin_code: str) -> dict:
@@ -93,10 +101,48 @@ def replace_many(path: Path, replacements: list[tuple[str, str]]) -> None:
 
 
 def copy_source_tree(repo_root: Path, workspace: Path) -> None:
+    ensure_required_submodules(repo_root)
     if workspace.exists():
         shutil.rmtree(workspace)
     workspace.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(repo_root, workspace, ignore=copy_ignore)
+
+
+def ensure_required_submodules(repo_root: Path) -> None:
+    if not missing_required_submodules(repo_root):
+        return
+
+    lock_dir = repo_root / "build" / "locks" / "submodules.lockd"
+    lock_dir.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 600
+    have_lock = False
+    while not have_lock:
+        try:
+            lock_dir.mkdir()
+            have_lock = True
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"timed out waiting for submodule lock: {lock_dir}")
+            time.sleep(1)
+
+    try:
+        if missing_required_submodules(repo_root):
+            subprocess.run(
+                ["git", "-C", str(repo_root), "submodule", "update", "--init", "--depth", "1", *REQUIRED_SUBMODULE_PATHS],
+                check=True,
+            )
+    finally:
+        if have_lock:
+            os.rmdir(lock_dir)
+
+
+def missing_required_submodules(repo_root: Path) -> list[str]:
+    missing = []
+    for path in REQUIRED_SUBMODULE_PATHS:
+        full_path = repo_root / path
+        if not full_path.is_dir() or not any(full_path.iterdir()):
+            missing.append(path)
+    return missing
 
 
 def copy_overlay_assets(repo_root: Path, workspace: Path, coin_code: str, coin: dict) -> None:

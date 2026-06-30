@@ -102,6 +102,24 @@ export function setThousandSep(on: boolean): void {
   }
 }
 
+// Sidebar Allocation (holdings donut) collapsed/expanded; expanded on first launch, remembered after.
+const ALLOCATION_OPEN_KEY = 'blakestream.allocationOpen'
+export function getAllocationOpen(): boolean {
+  try {
+    const stored = localStorage.getItem(ALLOCATION_OPEN_KEY)
+    return stored == null ? true : stored === '1'
+  } catch {
+    return true
+  }
+}
+export function setAllocationOpen(on: boolean): void {
+  try {
+    localStorage.setItem(ALLOCATION_OPEN_KEY, on ? '1' : '0')
+  } catch {
+    /* localStorage unavailable */
+  }
+}
+
 // Render a fixed-decimal string from a whole-coin amount, scaled by the unit, with optional grouping.
 function scaled(amount: number, unit: BaseUnit): string {
   const useGrouping = getThousandSep()

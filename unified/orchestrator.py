@@ -12,8 +12,7 @@ orchestrator:
     daemon JSON-RPC.
 
 The mnemonic stays in this process only — daemons receive a per-coin account xprv,
-never the seed (approach A; see ``blakestream-electrum.md`` §5b/§7 and the
-GROK-REVIEW-QUEUE note).
+never the seed (approach A; see ``blakestream-electrum.md`` §5b/§7).
 
 Recipe: configure rpc -> start daemon -> poll ``getinfo`` until ready -> ``restore``
 (account zprv via stdin) -> ``load_wallet`` -> aggregate -> ``stop``. The generated
@@ -71,8 +70,22 @@ MIN_SEND_CONFIRMATIONS = 6
 DEX_INTEGRATION_DEFAULT = {
     "allow_local_dex": False,
     "start_local_dex_on_startup": False,
+    "trusted_dex_id": None,
+    "trusted_dex_name": None,
+    "approved_at": None,
 }
 DEX_HEARTBEAT_TTL_SECONDS = 45
+DEX_STATUS_FILE = os.path.expanduser("~/.blakestream/dex-status.json")
+DEX_ANNOUNCE_RETRY_DELAYS = (0.5, 2.0, 5.0, 15.0, 30.0, 30.0, 30.0)
+DEFAULT_COIN_COLORS = {
+    "BLC": "#c7a470",
+    "BBTC": "#b03b30",
+    "ELT": "#5ea670",
+    "LIT": "#b29a53",
+    "PHO": "#517bbd",
+    "UMO": "#6154a6",
+}
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 # Price-source config (the user-customizable price/FX layer; see prices.py + test-api.md).
 PRICE_ROLES = ("coin_btc", "btc_fiat", "coin_fiat")
@@ -92,43 +105,6 @@ FAILOVER_CHECK_INTERVAL = 10  # how often the supervisor evaluates the condition
 FAILOVER_COOLDOWN = 600       # after a fruitless failover, leave this coin alone for 10 min
 FAILOVER_SYNC_GRACE = 15      # seconds to let a freshly-switched server sync before judging it
 SYNCED_POLL_INTERVAL = 8      # how often the supervisor refreshes each coin's is_synchronized flag
-
-_DEBUG_PLAIN_LOG_LOCK = threading.Lock()
-
-
-def _debug_plain_log(event: str, **fields) -> None:
-    """Opt-in unsafe plaintext test log.
-
-    Enabled only when BLAKESTREAM_WALLET_DEBUG_PLAIN=1. This is intentionally separate from
-    normal logging because it can include RPC params such as wallet passwords while we are
-    debugging local test machines.
-    """
-    if os.environ.get("BLAKESTREAM_WALLET_DEBUG_PLAIN") != "1":
-        return
-    path = os.environ.get("BLAKESTREAM_WALLET_DEBUG_LOG") or os.path.join(
-        os.path.expanduser("~"), ".config", "blakestream-electrum", "wallet-debug-plain-unsafe.log")
-    try:
-        max_chars = max(1000, int(os.environ.get("BLAKESTREAM_WALLET_DEBUG_MAX_CHARS") or "20000"))
-    except ValueError:
-        max_chars = 20000
-    row = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "pid": os.getpid(),
-        "thread": threading.get_ident(),
-        "event": event,
-        **fields,
-    }
-    try:
-        text = json.dumps(row, sort_keys=True, default=str)
-        if len(text) > max_chars:
-            text = text[:max_chars] + "...<truncated>"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with _DEBUG_PLAIN_LOG_LOCK:
-            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "a", encoding="utf-8") as f:
-                f.write(text + "\n")
-    except Exception:
-        pass
 
 
 def _friendly_send_error(raw: str, from_coins=None) -> str:
@@ -185,6 +161,11 @@ class CoinDaemon:
     bundled: bool = False
 
 
+class DexOrdersActiveError(Exception):
+    """Raised by stop_coin when the DEX is connected and the caller didn't pass force=True —
+    stopping the coin would drop it from the DEX, so the UI must confirm first (HTTP 409)."""
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -203,6 +184,7 @@ class Orchestrator:
         self.ports = ports or DEFAULT_RPC_PORTS
         self.oracle = oracle  # optional unified.prices.PriceOracle (duck-typed)
         self.datadirs_root = datadirs_root
+        self.api_port = 57100
         self._loaded: set = set()  # coins whose wallet is loaded in its daemon this session
         # Live unlock progress, updated by provision_all (POST thread) and read by the
         # /setup/progress GET (another thread) — guarded by a lock for clean reads.
@@ -252,6 +234,21 @@ class Orchestrator:
         self._dex_session_token = secrets.token_urlsafe(32)
         self._dex_last_seen_monotonic = None
         self._dex_last_seen_unix = None
+        self._dex_active_id = None
+        self._dex_pending_pair = None
+        self._dex_announce_lock = threading.Lock()
+        self._dex_announce_inflight = False
+        self._coin_colors_path = os.path.join(datadirs_root, "coin_colors.json")
+        self._coin_colors_lock = threading.Lock()
+        self._coin_colors = self._load_coin_colors()
+        # Which coins auto-start at launch: include_all (today's behavior) or a saved subset.
+        # Persisted 0600 beside coin_colors.json; a missing file => start all (backward-compatible).
+        # ``self._active`` is the set of coins MEANT to be running this session — it gates the
+        # supervisor's auto-restart and is updated by start_coin/stop_coin.
+        self._autostart_path = os.path.join(datadirs_root, "autostart_coins.json")
+        self._autostart_lock = threading.Lock()
+        self._autostart = self._load_autostart()
+        self._active: set = set()
         # Per-coin Lightning HUB: a well-known always-on LN node (node_id@host:port) the wallet
         # auto-connects to on bring-up, so users land already peered to a node they can open a
         # channel to (and route through). Read from an ``ln_hubs.json`` sidecar (admin/infra-set;
@@ -297,14 +294,18 @@ class Orchestrator:
         return self.daemons[ticker].server is not None
 
     def startup_status(self) -> dict:
-        """Live per-coin bring-up progress (polled by the Connecting screen)."""
+        """Live per-coin bring-up progress (polled by the Connecting screen). Coins the user
+        deliberately did not start are "stopped" and excluded from the ready/total math, so the
+        overlay's all-ready gate never waits on a coin that was never meant to start."""
         st = dict(self.status)
-        settled = sum(1 for v in st.values() if v in ("ready", "failed"))
+        active = [t for t in st if st[t] != "stopped"]
+        settled = sum(1 for t in active if st[t] in ("ready", "failed"))
         return {
             "coins": st,
-            "ready": sum(1 for v in st.values() if v == "ready"),
-            "total": len(st),
-            "all_ready": bool(st) and settled == len(st),
+            "ready": sum(1 for t in active if st[t] == "ready"),
+            "total": len(active),
+            "all_ready": bool(active) and settled == len(active),
+            "stopped": [t for t in st if st[t] == "stopped"],
         }
 
     def _load_dex_integration(self) -> dict:
@@ -320,12 +321,23 @@ class Orchestrator:
             start_on_startup = bool(saved.get("start_local_dex_on_startup", saved.get("allow_local_dex")))
             settings["start_local_dex_on_startup"] = start_on_startup
             settings["allow_local_dex"] = start_on_startup
+            trusted_dex_id = str(saved.get("trusted_dex_id") or "").strip()
+            trusted_dex_name = str(saved.get("trusted_dex_name") or "").strip()
+            if trusted_dex_id:
+                settings["trusted_dex_id"] = trusted_dex_id
+                settings["trusted_dex_name"] = trusted_dex_name[:80] or "Blakestream DEX"
+            approved_at = saved.get("approved_at")
+            if isinstance(approved_at, int) and approved_at > 0:
+                settings["approved_at"] = approved_at
         return settings
 
     def _save_dex_integration(self) -> None:
         tmp = self._dex_integration_path + ".tmp"
         saved = {
             "start_local_dex_on_startup": bool(self._dex_integration.get("start_local_dex_on_startup")),
+            "trusted_dex_id": self._dex_integration.get("trusted_dex_id"),
+            "trusted_dex_name": self._dex_integration.get("trusted_dex_name"),
+            "approved_at": self._dex_integration.get("approved_at"),
         }
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(saved, f)
@@ -335,6 +347,102 @@ class Orchestrator:
             pass
         os.replace(tmp, self._dex_integration_path)
 
+    def _normalize_coin_colors(self, colors) -> dict:
+        normalized = dict(DEFAULT_COIN_COLORS)
+        if isinstance(colors, dict):
+            for ticker, color in colors.items():
+                t = str(ticker or "").upper().strip()
+                c = str(color or "").strip()
+                if t and _HEX_COLOR_RE.match(c):
+                    normalized[t] = c.lower()
+        return normalized
+
+    def _load_coin_colors(self) -> dict:
+        try:
+            with open(self._coin_colors_path, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return self._normalize_coin_colors({})
+        return self._normalize_coin_colors(saved)
+
+    def _save_coin_colors(self) -> None:
+        tmp = self._coin_colors_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._coin_colors, f, sort_keys=True)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, self._coin_colors_path)
+
+    def coin_colors(self) -> dict:
+        with self._coin_colors_lock:
+            return {"colors": dict(self._coin_colors)}
+
+    def set_coin_colors(self, colors) -> dict:
+        with self._coin_colors_lock:
+            self._coin_colors = self._normalize_coin_colors(colors)
+            self._save_coin_colors()
+            return {"colors": dict(self._coin_colors)}
+
+    def _load_autostart(self) -> dict:
+        pref = {"include_all": True, "coins": set()}
+        try:
+            with open(self._autostart_path, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return pref
+        if isinstance(saved, dict):
+            pref["include_all"] = bool(saved.get("include_all", True))
+            coins = saved.get("coins") or []
+            if isinstance(coins, (list, tuple)):
+                pref["coins"] = {str(t).upper().strip() for t in coins
+                                 if str(t).upper().strip() in self.daemons}
+        return pref
+
+    def _save_autostart(self) -> None:
+        tmp = self._autostart_path + ".tmp"
+        saved = {"include_all": bool(self._autostart["include_all"]),
+                 "coins": sorted(self._autostart["coins"])}
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(saved, f, sort_keys=True)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, self._autostart_path)
+
+    def autostart_settings(self) -> dict:
+        with self._autostart_lock:
+            return {
+                "include_all": bool(self._autostart["include_all"]),
+                "coins": sorted(self._autostart["coins"]),
+                "available": list(self.daemons),
+            }
+
+    def set_autostart(self, include_all, coins) -> dict:
+        """Persist the autostart preference. Takes effect NEXT launch; does NOT start/stop
+        daemons now. An empty subset with include_all False is coerced to 'start all' so a
+        zero-coin startup is never persisted."""
+        with self._autostart_lock:
+            inc = bool(include_all)
+            chosen = {str(t).upper().strip() for t in (coins or [])
+                      if str(t).upper().strip() in self.daemons}
+            if not inc and not chosen:
+                inc = True
+            self._autostart = {"include_all": inc, "coins": chosen}
+            self._save_autostart()
+            return {"include_all": inc, "coins": sorted(chosen), "available": list(self.daemons)}
+
+    def active_tickers(self) -> list:
+        """Resolve the autostart preference to the concrete coin set to bring up at launch.
+        Falls back to all coins if the saved subset is empty/unknown (defensive)."""
+        with self._autostart_lock:
+            if self._autostart["include_all"]:
+                return list(self.daemons)
+            chosen = self._autostart["coins"]
+            return [t for t in self.daemons if t in chosen] or list(self.daemons)
+
     def _dex_connected_locked(self) -> bool:
         if not self._dex_integration.get("allow_local_dex"):
             return False
@@ -342,14 +450,80 @@ class Orchestrator:
             return False
         return (time.monotonic() - self._dex_last_seen_monotonic) <= DEX_HEARTBEAT_TTL_SECONDS
 
+    @staticmethod
+    def _normalize_dex_id(value) -> str:
+        dex_id = str(value or "").strip()
+        if not dex_id or len(dex_id) > 128:
+            return ""
+        return dex_id
+
+    @staticmethod
+    def _normalize_dex_name(value) -> str:
+        dex_name = str(value or "").strip()
+        return dex_name[:80] or "Blakestream DEX"
+
+    def _is_trusted_dex_locked(self, dex_id: Optional[str]) -> bool:
+        dex_id = self._normalize_dex_id(dex_id)
+        trusted = self._normalize_dex_id(self._dex_integration.get("trusted_dex_id"))
+        return bool(dex_id and trusted and hmac.compare_digest(dex_id, trusted))
+
+    def _pending_dex_pair_snapshot_locked(self) -> Optional[dict]:
+        pending = self._dex_pending_pair
+        if not isinstance(pending, dict):
+            return None
+        dex_id = self._normalize_dex_id(pending.get("id"))
+        if not dex_id:
+            return None
+        first_seen = pending.get("first_seen")
+        return {
+            "id": dex_id,
+            "name": self._normalize_dex_name(pending.get("name")),
+            "first_seen": first_seen if isinstance(first_seen, int) else None,
+        }
+
+    def _set_pending_dex_pair_locked(self, dex_id: str, dex_name: Optional[str]) -> Optional[dict]:
+        dex_id = self._normalize_dex_id(dex_id)
+        if not dex_id:
+            return self._pending_dex_pair_snapshot_locked()
+        existing = self._dex_pending_pair if isinstance(self._dex_pending_pair, dict) else {}
+        existing_id = self._normalize_dex_id(existing.get("id"))
+        if existing_id and existing_id != dex_id:
+            return self._pending_dex_pair_snapshot_locked()
+        first_seen = existing.get("first_seen") if existing.get("id") == dex_id else int(time.time())
+        self._dex_pending_pair = {
+            "id": dex_id,
+            "name": self._normalize_dex_name(dex_name),
+            "first_seen": first_seen,
+        }
+        return self._pending_dex_pair_snapshot_locked()
+
+    def _validate_dex_identity_locked(self, dex_id: Optional[str], dex_session_token: str) -> str:
+        dex_id = self._normalize_dex_id(dex_id)
+        if not dex_id:
+            raise PermissionError("DEX identity is required. Reconnect Electrum Multiwallet from Blakestream DEX.")
+        if not self._is_trusted_dex_locked(dex_id):
+            raise PermissionError("unknown DEX instance. Approve this DEX in Electrum Multiwallet settings.")
+        if self._dex_active_id and self._dex_active_id != dex_id and self._dex_connected_locked():
+            raise PermissionError("another DEX is already connected")
+        if not hmac.compare_digest(str(dex_session_token or ""), self._dex_session_token):
+            raise PermissionError("invalid DEX session")
+        self._dex_active_id = dex_id
+        return dex_id
+
     def _dex_integration_snapshot_locked(self) -> dict:
         allowed = bool(self._dex_integration.get("allow_local_dex"))
+        connected = self._dex_connected_locked()
         return {
             "allow_local_dex": allowed,
             "start_local_dex_on_startup": bool(self._dex_integration.get("start_local_dex_on_startup")),
-            "dex_connected": self._dex_connected_locked(),
+            "dex_connected": connected,
             "dex_last_seen": self._dex_last_seen_unix if allowed else None,
             "heartbeat_ttl_seconds": DEX_HEARTBEAT_TTL_SECONDS,
+            "trusted_dex_id": self._normalize_dex_id(self._dex_integration.get("trusted_dex_id")) or None,
+            "trusted_dex_name": self._dex_integration.get("trusted_dex_name") or None,
+            "approved_at": self._dex_integration.get("approved_at"),
+            "active_dex_id": self._dex_active_id if connected else None,
+            "pending_dex_pair": self._pending_dex_pair_snapshot_locked(),
         }
 
     def _rotate_dex_session_token_locked(self) -> None:
@@ -358,79 +532,275 @@ class Orchestrator:
     def dex_integration_settings(self) -> dict:
         with self._dex_integration_lock:
             snapshot = self._dex_integration_snapshot_locked()
-            _debug_plain_log("dex_integration_settings", snapshot=snapshot)
             return snapshot
 
-    def set_dex_integration(self, allow_local_dex) -> dict:
+    def approve_dex_pairing(self, dex_id, dex_name=None) -> dict:
+        dex_id = self._normalize_dex_id(dex_id)
+        if not dex_id:
+            raise ValueError("dex_id is required")
+        should_announce = False
         with self._dex_integration_lock:
-            before = self._dex_integration_snapshot_locked()
+            self._dex_integration["allow_local_dex"] = True
+            self._dex_integration["trusted_dex_id"] = dex_id
+            self._dex_integration["trusted_dex_name"] = self._normalize_dex_name(dex_name)
+            self._dex_integration["approved_at"] = int(time.time())
+            self._rotate_dex_session_token_locked()
+            self._dex_pending_pair = None
+            self._dex_active_id = None
+            self._dex_last_seen_monotonic = None
+            self._dex_last_seen_unix = None
+            self._save_dex_integration()
+            should_announce = bool(self._dex_integration.get("start_local_dex_on_startup"))
+            after = self._dex_integration_snapshot_locked()
+        if should_announce:
+            self.schedule_dex_announce("dex-approved")
+        return after
+
+    def forget_dex_pairing(self) -> dict:
+        with self._dex_integration_lock:
+            self._dex_integration["trusted_dex_id"] = None
+            self._dex_integration["trusted_dex_name"] = None
+            self._dex_integration["approved_at"] = None
+            self._rotate_dex_session_token_locked()
+            self._dex_pending_pair = None
+            self._dex_active_id = None
+            self._dex_last_seen_monotonic = None
+            self._dex_last_seen_unix = None
+            self._save_dex_integration()
+            return self._dex_integration_snapshot_locked()
+
+    def clear_pending_dex_pairing(self) -> dict:
+        with self._dex_integration_lock:
+            self._dex_pending_pair = None
+            return self._dex_integration_snapshot_locked()
+
+    def cancel_pending_dex_pairing(self, dex_id) -> dict:
+        dex_id = self._normalize_dex_id(dex_id)
+        with self._dex_integration_lock:
+            pending = self._pending_dex_pair_snapshot_locked()
+            pending_id = self._normalize_dex_id((pending or {}).get("id"))
+            if dex_id and pending_id and hmac.compare_digest(dex_id, pending_id):
+                self._dex_pending_pair = None
+            return self._dex_integration_snapshot_locked()
+
+    def set_dex_integration(self, allow_local_dex) -> dict:
+        should_announce = False
+        with self._dex_integration_lock:
             self._dex_integration["allow_local_dex"] = bool(allow_local_dex)
             if not self._dex_integration["allow_local_dex"]:
                 self._rotate_dex_session_token_locked()
                 self._dex_last_seen_monotonic = None
                 self._dex_last_seen_unix = None
+                self._dex_active_id = None
+                self._dex_pending_pair = None
+            else:
+                should_announce = bool(self._dex_integration.get("start_local_dex_on_startup"))
             after = self._dex_integration_snapshot_locked()
-            _debug_plain_log("dex_integration_set", requested=allow_local_dex,
-                             before=before, after=after,
-                             dex_session_token=self._dex_session_token)
-            return after
+        if should_announce:
+            self.schedule_dex_announce("integration-enabled")
+        return after
 
     def set_dex_start_on_startup(self, start_local_dex_on_startup) -> dict:
+        should_announce = False
         with self._dex_integration_lock:
-            before = self._dex_integration_snapshot_locked()
             start = bool(start_local_dex_on_startup)
             self._dex_integration["start_local_dex_on_startup"] = start
             if start:
                 self._dex_integration["allow_local_dex"] = True
+                should_announce = True
             self._save_dex_integration()
             after = self._dex_integration_snapshot_locked()
-            _debug_plain_log("dex_integration_start_on_startup_set",
-                             requested=start_local_dex_on_startup,
-                             before=before, after=after,
-                             dex_session_token=self._dex_session_token)
-            return after
+        if should_announce:
+            self.schedule_dex_announce("startup-enabled")
+        return after
 
-    def record_dex_heartbeat(self) -> dict:
+    def record_dex_heartbeat(self, dex_instance_id=None, dex_session_token=None) -> dict:
         with self._dex_integration_lock:
             if not self._dex_integration.get("allow_local_dex"):
                 snapshot = self._dex_integration_snapshot_locked()
-                _debug_plain_log("dex_heartbeat_ignored", reason="integration-disabled",
-                                 snapshot=snapshot)
                 return snapshot
-            before = self._dex_integration_snapshot_locked()
+            self._validate_dex_identity_locked(dex_instance_id, dex_session_token)
             self._dex_last_seen_monotonic = time.monotonic()
             self._dex_last_seen_unix = int(time.time())
             after = self._dex_integration_snapshot_locked()
-            _debug_plain_log("dex_heartbeat_recorded", before=before, after=after,
-                             dex_session_token=self._dex_session_token)
             return after
 
-    def dex_ready_status(self) -> dict:
-        started = time.monotonic()
-        settings = self.dex_integration_settings()
-        allowed = bool(settings.get("allow_local_dex"))
-        if not allowed:
-            result = {
-                "integration_allowed": False,
-                "scoped_signing": False,
-                "dex_connected": False,
-                "dex_last_seen": None,
-                "heartbeat_ttl_seconds": DEX_HEARTBEAT_TTL_SECONDS,
-            }
-            _debug_plain_log("dex_ready_status", elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                             allowed=allowed, result=result)
-            return result
+    def _dex_auto_connect_enabled(self) -> bool:
+        with self._dex_integration_lock:
+            return bool(self._dex_integration.get("allow_local_dex")
+                        and self._dex_integration.get("start_local_dex_on_startup"))
+
+    def _dex_announce_allowed(self, require_startup_auto: bool = True) -> bool:
+        with self._dex_integration_lock:
+            if not self._dex_integration.get("allow_local_dex"):
+                return False
+            if require_startup_auto:
+                return bool(self._dex_integration.get("start_local_dex_on_startup"))
+            return bool(self._normalize_dex_id(self._dex_integration.get("trusted_dex_id")))
+
+    def _read_dex_status_file(self) -> Optional[dict]:
+        try:
+            st = os.stat(DEX_STATUS_FILE)
+            if os.name != "nt" and (st.st_mode & 0o077):
+                return None
+            with open(DEX_STATUS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        host = str(data.get("host") or "127.0.0.1").strip()
+        port = data.get("port")
+        path = str(data.get("announce_path") or "/integrations/electrum/announce").strip()
+        token = str(data.get("announce_token") or "").strip()
+        if host not in ("127.0.0.1", "localhost"):
+            return None
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            return None
+        if not path.startswith("/") or "://" in path:
+            return None
+        if len(token) < 32:
+            return None
+        dex_instance_id = self._normalize_dex_id(data.get("dex_instance_id"))
+        dex_name = self._normalize_dex_name(data.get("dex_name"))
+        return {
+            "host": host,
+            "port": port,
+            "path": path,
+            "announce_token": token,
+            "dex_instance_id": dex_instance_id,
+            "dex_name": dex_name,
+        }
+
+    def _dex_status_matches_trusted_pair(self, status: dict) -> bool:
+        status_dex_id = self._normalize_dex_id(status.get("dex_instance_id"))
+        if not status_dex_id:
+            return False
+        with self._dex_integration_lock:
+            trusted_dex_id = self._normalize_dex_id(self._dex_integration.get("trusted_dex_id"))
+        return bool(trusted_dex_id and hmac.compare_digest(status_dex_id, trusted_dex_id))
+
+    def _post_dex_announce(self, status: dict) -> bool:
+        url = f"http://127.0.0.1:{int(status['port'])}{status['path']}"
+        payload = json.dumps({
+            "wallet_ready_port": int(getattr(self, "api_port", 57100) or 57100),
+            "wallet_version": "Blakestream Wallet",
+            "auto_start": True,
+            "announce_token": status["announce_token"],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return 200 <= int(resp.status) < 300
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+            return False
+
+    def schedule_dex_announce(self, reason: str = "", require_startup_auto: bool = True) -> None:
+        if not self._dex_announce_allowed(require_startup_auto=require_startup_auto):
+            return
+        with self._dex_announce_lock:
+            if self._dex_announce_inflight:
+                return
+            self._dex_announce_inflight = True
+
+        def _worker():
+            try:
+                for delay in DEX_ANNOUNCE_RETRY_DELAYS:
+                    if not self._dex_announce_allowed(require_startup_auto=require_startup_auto) or self._stopping:
+                        return
+                    time.sleep(delay)
+                    status = self._read_dex_status_file()
+                    if not status:
+                        continue
+                    if not require_startup_auto and not self._dex_status_matches_trusted_pair(status):
+                        continue
+                    if self._post_dex_announce(status):
+                        return
+            finally:
+                with self._dex_announce_lock:
+                    self._dex_announce_inflight = False
+
+        threading.Thread(target=_worker, name=f"dex-announce-{reason or 'startup'}", daemon=True).start()
+
+    def dex_ready_status(self, dex_instance_id=None, dex_name=None) -> dict:
+        dex_id = self._normalize_dex_id(dex_instance_id)
+        dex_display_name = self._normalize_dex_name(dex_name)
+        with self._dex_integration_lock:
+            settings = self._dex_integration_snapshot_locked()
+            allowed = bool(settings.get("allow_local_dex"))
+            if not allowed:
+                result = {
+                    "integration_allowed": False,
+                    "scoped_signing": False,
+                    "dex_connected": False,
+                    "dex_last_seen": None,
+                    "heartbeat_ttl_seconds": DEX_HEARTBEAT_TTL_SECONDS,
+                }
+                return result
+            if not dex_id:
+                return {
+                    "integration_allowed": True,
+                    "scoped_signing": False,
+                    "require_approval": False,
+                    "dex_connected": False,
+                    "error": "DEX identity is required",
+                    "_http_status": 400,
+                }
+            if not self._is_trusted_dex_locked(dex_id):
+                if not self._dex_integration.get("trusted_dex_id"):
+                    pending = self._set_pending_dex_pair_locked(dex_id, dex_display_name)
+                    pending_id = self._normalize_dex_id((pending or {}).get("id"))
+                    message = "Approve this DEX in Electrum Multiwallet settings."
+                    if pending_id and pending_id != dex_id:
+                        pending_name = self._normalize_dex_name((pending or {}).get("name"))
+                        message = (
+                            f"{pending_name} is already waiting for approval. "
+                            "Clear it in Electrum Multiwallet settings before approving a different DEX."
+                        )
+                    return {
+                        "integration_allowed": True,
+                        "scoped_signing": False,
+                        "require_approval": True,
+                        "already_pending": bool(pending_id and pending_id != dex_id),
+                        "dex_instance_id": dex_id,
+                        "dex_name": dex_display_name,
+                        "pending_dex_pair": pending,
+                        "message": message,
+                    }
+                return {
+                    "integration_allowed": True,
+                    "scoped_signing": False,
+                    "require_approval": False,
+                    "dex_connected": settings.get("dex_connected"),
+                    "trusted_dex_id": settings.get("trusted_dex_id"),
+                    "trusted_dex_name": settings.get("trusted_dex_name"),
+                    "error": "A different DEX is already paired. Forget the paired DEX before connecting another one.",
+                    "_http_status": 403,
+                }
+            dex_session_token = self._dex_session_token
 
         coins = {}
+        coin_colors = self.coin_colors().get("colors", {})
         for ticker, d in self.daemons.items():
             info = {}
             rpc_error = None
-            running = bool(d.proc and d.proc.poll() is None)
-            if running:
+            status = self.status.get(ticker)
+            running = False
+            if status not in ("stopped", "stopping"):
                 try:
                     info = self._drpc(ticker, "getinfo", {}, timeout=2) or {}
+                    running = True
                 except Exception as e:
                     rpc_error = str(e)[:120]
+                    try:
+                        running = self.daemon_alive(ticker, timeout=2)
+                    except Exception:
+                        running = False
             coin = self.coins.get(ticker, {})
             network = (
                 info.get("network") if isinstance(info, dict) else None
@@ -446,9 +816,10 @@ class Orchestrator:
                 "rpc_port": d.rpc_port,
                 "rpc_user": d.rpc_user,
                 "network": network,
+                "coin_color": coin_colors.get(ticker),
                 "connected": bool(isinstance(info, dict) and info.get("connected")),
                 "running": running,
-                "status": self.status.get(ticker),
+                "status": status,
                 "rpc_error": rpc_error,
             }
         result = {
@@ -457,7 +828,10 @@ class Orchestrator:
             "version": "0.25.2",
             "multiwallet": True,
             "scoped_signing": True,
-            "dex_session_token": self._dex_session_token,
+            "require_approval": False,
+            "dex_instance_id": dex_id,
+            "dex_name": settings.get("trusted_dex_name") or dex_display_name,
+            "dex_session_token": dex_session_token,
             "dex_connected": bool(settings.get("dex_connected")),
             "dex_last_seen": settings.get("dex_last_seen"),
             "heartbeat_ttl_seconds": settings.get("heartbeat_ttl_seconds"),
@@ -465,9 +839,6 @@ class Orchestrator:
             "datadirs_root": self.datadirs_root,
             "coins": coins,
         }
-        _debug_plain_log("dex_ready_status", elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                         allowed=allowed, result=result,
-                         dex_session_token=self._dex_session_token)
         return result
 
     def _dex_amount_to_sats(self, amount) -> int:
@@ -508,6 +879,23 @@ class Orchestrator:
             return None
         return text
 
+    @staticmethod
+    def _dex_description(value) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:180] or None
+
+    def _set_label_best_effort(self, ticker: str, key: str, label: Optional[str]) -> None:
+        if not key or not label:
+            return
+        try:
+            self.set_label(ticker, key, label)
+        except Exception:
+            pass
+
     def _record_dex_funding_audit(self, entry: dict) -> None:
         row = {
             "time": int(time.time()),
@@ -527,9 +915,11 @@ class Orchestrator:
         amount,
         dex_session_token: str,
         rpc_password: str,
+        dex_instance_id: Optional[str] = None,
         *,
         swap_id=None,
         order_id=None,
+        description=None,
     ) -> dict:
         """Scoped local DEX funding endpoint: fund exactly one HTLC address.
 
@@ -543,9 +933,7 @@ class Orchestrator:
         with self._dex_integration_lock:
             if not self._dex_integration.get("allow_local_dex"):
                 raise PermissionError("local DEX integration disabled")
-            expected_token = self._dex_session_token
-        if not hmac.compare_digest(str(dex_session_token or ""), expected_token):
-            raise PermissionError("invalid DEX session")
+            dex_instance_id = self._validate_dex_identity_locked(dex_instance_id, dex_session_token)
         expected_rpc_password = self.daemons[ticker].rpc_password
         if not hmac.compare_digest(str(rpc_password or ""), str(expected_rpc_password or "")):
             raise PermissionError("invalid DEX RPC credential")
@@ -579,6 +967,8 @@ class Orchestrator:
         txid = (b.stdout or "").strip()
         if not txid:
             raise RuntimeError("transaction was built but the broadcast did not return a txid")
+        label = self._dex_description(description)
+        self._set_label_best_effort(ticker, txid, label)
         self._record_dex_funding_audit({
             "action": "dex_fund_htlc",
             "ticker": ticker,
@@ -586,52 +976,36 @@ class Orchestrator:
             "amount": amount_text,
             "amount_sat": expected_sats,
             "txid": txid,
+            "dex_instance_id": dex_instance_id,
+            **({"description": label} if label else {}),
             **({"swap_id": self._dex_trace_id(swap_id)} if self._dex_trace_id(swap_id) else {}),
             **({"order_id": self._dex_trace_id(order_id)} if self._dex_trace_id(order_id) else {}),
         })
         return {"txid": txid}
 
-    def _authorize_dex_coin(self, ticker: str, dex_session_token: str, rpc_password: str) -> str:
+    def _authorize_dex_coin(
+        self,
+        ticker: str,
+        dex_session_token: str,
+        rpc_password: str,
+        dex_instance_id: Optional[str] = None,
+    ) -> str:
         ticker = str(ticker or "").upper().strip()
-        _debug_plain_log("dex_authorize_enter", ticker=ticker,
-                         dex_session_token=dex_session_token, rpc_password=rpc_password)
         if not ticker or ticker not in self.daemons:
-            _debug_plain_log("dex_authorize_unknown_coin", ticker=ticker,
-                             dex_session_token=dex_session_token, rpc_password=rpc_password)
             raise KeyError(ticker or "unknown")
         with self._dex_integration_lock:
-            allow_local_dex = self._dex_integration.get("allow_local_dex")
-            expected_token = self._dex_session_token
-            _debug_plain_log("dex_authorize_integration_state", ticker=ticker,
-                             allow_local_dex=allow_local_dex,
-                             dex_integration=self._dex_integration,
-                             provided_dex_session_token=dex_session_token,
-                             expected_dex_session_token=expected_token)
-            if not allow_local_dex:
+            if not self._dex_integration.get("allow_local_dex"):
                 raise PermissionError("local DEX integration disabled")
-        if not hmac.compare_digest(str(dex_session_token or ""), expected_token):
-            _debug_plain_log("dex_authorize_bad_session", ticker=ticker,
-                             provided_dex_session_token=dex_session_token,
-                             expected_dex_session_token=expected_token)
-            raise PermissionError("invalid DEX session")
+            self._validate_dex_identity_locked(dex_instance_id, dex_session_token)
         expected_rpc_password = self.daemons[ticker].rpc_password
-        _debug_plain_log("dex_authorize_rpc_state", ticker=ticker,
-                         provided_rpc_password=rpc_password,
-                         expected_rpc_password=expected_rpc_password)
         if not hmac.compare_digest(str(rpc_password or ""), str(expected_rpc_password or "")):
-            _debug_plain_log("dex_authorize_bad_rpc_password", ticker=ticker,
-                             provided_rpc_password=rpc_password,
-                             expected_rpc_password=expected_rpc_password)
             raise PermissionError("invalid DEX RPC credential")
         locked = self.locked()
         wallet_pw = self._wallet_pw(ticker)
-        _debug_plain_log("dex_authorize_wallet_state", ticker=ticker,
-                         locked=locked, wallet_password=wallet_pw)
         if self.locked():
             raise PermissionError("unlock the Electrum Multiwallet before starting swaps")
         if not wallet_pw:
             raise PermissionError(f"unlock {ticker} before starting swaps")
-        _debug_plain_log("dex_authorize_ok", ticker=ticker)
         return ticker
 
     @staticmethod
@@ -652,12 +1026,14 @@ class Orchestrator:
         invoice: str,
         dex_session_token: str,
         rpc_password: str,
+        dex_instance_id: Optional[str] = None,
         *,
         timeout=None,
         max_cltv=None,
         max_fee_msat=None,
         swap_id=None,
         order_id=None,
+        description=None,
     ) -> dict:
         """Scoped local DEX Lightning payment endpoint.
 
@@ -665,11 +1041,7 @@ class Orchestrator:
         but never receives the per-coin wallet unlock password. The already-unlocked
         multiwallet pays internally using its live session key.
         """
-        _debug_plain_log("dex_pay_lightning_enter", ticker=ticker, invoice=invoice,
-                         dex_session_token=dex_session_token, rpc_password=rpc_password,
-                         timeout=timeout, max_cltv=max_cltv, max_fee_msat=max_fee_msat,
-                         swap_id=swap_id, order_id=order_id)
-        ticker = self._authorize_dex_coin(ticker, dex_session_token, rpc_password)
+        ticker = self._authorize_dex_coin(ticker, dex_session_token, rpc_password, dex_instance_id)
         invoice = str(invoice or "").strip()
         self._ln_guard(invoice)
         if not re.match(r"^ln[a-z0-9]{8,}$", invoice, re.IGNORECASE):
@@ -679,8 +1051,6 @@ class Orchestrator:
             "max_cltv": self._optional_positive_int(max_cltv, "max_cltv"),
             "max_fee_msat": self._optional_positive_int(max_fee_msat, "max_fee_msat"),
         }
-        _debug_plain_log("dex_pay_lightning_options", ticker=ticker, invoice=invoice,
-                         options=options, swap_id=swap_id, order_id=order_id)
         result = self.ln_pay(
             ticker,
             invoice,
@@ -712,23 +1082,26 @@ class Orchestrator:
                 except Exception as e:
                     diagnostics[f"{name}_error"] = repr(e)
             result["diagnostics"] = diagnostics
-            _debug_plain_log("dex_pay_lightning_payment_failed",
-                             ticker=ticker, invoice=invoice, options=options,
-                             result=result, diagnostics=diagnostics,
-                             swap_id=swap_id, order_id=order_id)
-        _debug_plain_log("dex_pay_lightning_result", ticker=ticker, invoice=invoice,
-                         options=options, result=result, swap_id=swap_id,
-                         order_id=order_id)
+        label = self._dex_description(description)
+        if isinstance(result, dict):
+            payment_hash = str(result.get("payment_hash") or "").strip()
+            if re.match(r"^[0-9a-fA-F]{64}$", payment_hash):
+                self._set_label_best_effort(ticker, payment_hash, label)
         self._record_dex_funding_audit({
             "action": "dex_pay_lightning",
             "ticker": ticker,
+            **({"description": label} if label else {}),
             **({"swap_id": self._dex_trace_id(swap_id)} if self._dex_trace_id(swap_id) else {}),
             **({"order_id": self._dex_trace_id(order_id)} if self._dex_trace_id(order_id) else {}),
         })
         return {"result": result}
 
     def _env(self, d: CoinDaemon) -> dict:
+        # ELECTRUMDIR points the daemon at this coin's own datadir. Some Electrum forks rename the
+        # var to ELECTRUM<TICKER>_DIR and ignore ELECTRUMDIR, so set that too — harmless for forks
+        # that read ELECTRUMDIR, and keeps every coin's daemon isolated to its own per-coin datadir.
         env = dict(os.environ, ELECTRUMDIR=d.datadir)
+        env[f"ELECTRUM{d.ticker.upper()}_DIR"] = d.datadir
         if not d.bundled:                       # source mode needs the variant on the path
             py_path = [d.workspace]
             if env.get("PYTHONPATH"):
@@ -743,23 +1116,8 @@ class Orchestrator:
         if not online:
             cmd.append("--offline")
         cmd += [str(a) for a in args]
-        req_id = f"cli-{time.time_ns()}-{threading.get_ident()}"
-        started = time.monotonic()
-        _debug_plain_log("coin_cli_start", id=req_id, ticker=d.ticker, args=list(args),
-                         online=online, timeout=timeout, cwd=d.cwd, stdin=stdin)
-        try:
-            result = subprocess.run(cmd, cwd=d.cwd, env=self._env(d), input=stdin,
-                                    capture_output=True, text=True, timeout=timeout)
-        except Exception as e:
-            _debug_plain_log("coin_cli_exception", id=req_id, ticker=d.ticker,
-                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                             error=repr(e))
-            raise
-        _debug_plain_log("coin_cli_done", id=req_id, ticker=d.ticker,
-                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                         returncode=result.returncode,
-                         stdout=result.stdout, stderr=result.stderr)
-        return result
+        return subprocess.run(cmd, cwd=d.cwd, env=self._env(d), input=stdin,
+                              capture_output=True, text=True, timeout=timeout)
 
     def _checked(self, d: CoinDaemon, *args, **kw):
         r = self._run(d, *args, **kw)
@@ -903,28 +1261,15 @@ class Orchestrator:
         """Call a coin daemon's JSON-RPC directly (loopback + BasicAuth) so secrets such as the
         wallet password ride in the request BODY, never on a command line (no ps/log leak)."""
         d = self.daemons[ticker]
-        req_id = f"drpc-{time.time_ns()}-{threading.get_ident()}"
-        started = time.monotonic()
-        _debug_plain_log("daemon_rpc_start", id=req_id, ticker=ticker, method=method,
-                         rpc_port=d.rpc_port, timeout=timeout, params=params)
         body = json.dumps({"id": 0, "jsonrpc": "2.0", "method": method, "params": params}).encode()
         auth = base64.b64encode(f"{d.rpc_user}:{d.rpc_password}".encode()).decode()
         req = urllib.request.Request(
             f"http://127.0.0.1:{d.rpc_port}/", data=body,
             headers={"Content-Type": "application/json", "Authorization": "Basic " + auth})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                resp = json.loads(r.read().decode())
-        except Exception as e:
-            _debug_plain_log("daemon_rpc_exception", id=req_id, ticker=ticker, method=method,
-                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                             error=repr(e))
-            raise
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.loads(r.read().decode())
         if isinstance(resp, dict) and resp.get("error"):
             err = resp["error"]
-            _debug_plain_log("daemon_rpc_error", id=req_id, ticker=ticker, method=method,
-                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                             error=err, response=resp)
             if isinstance(err, dict):
                 msg = err.get("message") or ""
                 data = err.get("data")
@@ -937,9 +1282,6 @@ class Orchestrator:
                 raise RuntimeError(f"{method}: {msg}")
             raise RuntimeError(f"{method}: {err}")
         result = resp.get("result") if isinstance(resp, dict) else None
-        _debug_plain_log("daemon_rpc_ok", id=req_id, ticker=ticker, method=method,
-                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                         result=result)
         return result
 
     @staticmethod
@@ -1036,9 +1378,48 @@ class Orchestrator:
         IS answering, just with a different rpcpassword). Match by the coin's daemon binary
         NAME but a DIFFERENT executable path (a separate or now-deleted mount), so we never
         touch the daemon we manage this session. Linux /proc only; best-effort, silent."""
-        if not d.bundled:            # dev mode runs `python run_electrum` — argv0 (python)
-            return                   # is shared across coins, so the name test can't apply
         if not os.path.isdir("/proc"):   # non-Linux: no cheap port-owner scan; skip
+            return
+        if not d.bundled:
+            # Source mode runs ``python <coin>/run_electrum daemon -d``. If the backend restarts,
+            # the detached daemon may survive with the previous per-launch rpcpassword. A new
+            # orchestrator cannot authenticate to it, so kill the exact coin workspace daemon and
+            # let start() relaunch it with the freshly-written config.
+            run_electrum = os.path.realpath(d.cmd[-1])
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{entry}/cmdline", "rb") as f:
+                        argv = [a for a in f.read().split(b"\x00") if a]
+                except OSError:
+                    continue
+                if b"daemon" not in argv:
+                    continue
+                paths = []
+                for arg in argv:
+                    try:
+                        text = arg.decode("utf-8", "replace")
+                    except Exception:
+                        continue
+                    if text.startswith("/"):
+                        paths.append(os.path.realpath(text))
+                if run_electrum not in paths:
+                    continue
+                pid = int(entry)
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+                for _ in range(15):
+                    time.sleep(0.2)
+                    if not os.path.exists(f"/proc/{entry}"):
+                        break
+                else:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
             return
         name = os.path.basename(d.cmd[0])   # e.g. "electrum-umo" — unique per coin
         for entry in os.listdir("/proc"):
@@ -1077,6 +1458,8 @@ class Orchestrator:
         d = self.daemons[ticker]
         with self._start_guard(d):
             if self._stopping:   # a supervisor tick that raced stop_all into the lock: veto
+                return
+            if self.daemon_alive(ticker):   # already running (start_coin vs supervisor race): idempotent
                 return
             # Reap any daemon for THIS coin left behind by a PREVIOUS app instance (a
             # replaced or crashed AppImage orphans its double-forked `daemon -d` to init,
@@ -1223,50 +1606,50 @@ class Orchestrator:
                 self.set_session_keys(wallet_pws, contacts_key)
             except Exception:
                 pass
+        # Only start the coins the user chose to auto-start; the rest stay "stopped" (known,
+        # listed, startable on demand). ``self._active`` gates the supervisor's auto-restart.
+        active = set(self.active_tickers())
+        self._active = set(active)
         for t in self.daemons:
-            self.status[t] = "starting"
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.daemons) or 1) as ex:
-            # 60s (not the default 45) of cold-start margin: six ~200MB PyInstaller daemons
-            # spawning at once can make a couple slow to answer; the supervisor still heals any
-            # that come up after this anyway, but the extra margin avoids the dim-then-light flicker.
-            futures = {ex.submit(self.bring_up, t, mnemonic, passphrase, ready_timeout=60.0): t
-                       for t in self.daemons}
-            for fut in concurrent.futures.as_completed(futures):
-                ticker = futures[fut]
-                try:
-                    fut.result()
-                    self.status[ticker] = "ready"
-                except Exception as e:
-                    self.status[ticker] = "failed"
-                    errors[ticker] = str(e)[:200]
+            self.status[t] = "starting" if t in active else "stopped"
+        if active:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
+                # 60s (not the default 45) of cold-start margin: ~200MB PyInstaller daemons
+                # spawning at once can make a couple slow to answer; the supervisor still heals any
+                # that come up after this anyway, but the extra margin avoids the dim-then-light flicker.
+                futures = {ex.submit(self.bring_up, t, mnemonic, passphrase, ready_timeout=60.0): t
+                           for t in active}
+                for fut in concurrent.futures.as_completed(futures):
+                    ticker = futures[fut]
+                    try:
+                        fut.result()
+                        self.status[ticker] = "ready"
+                    except Exception as e:
+                        self.status[ticker] = "failed"
+                        errors[ticker] = str(e)[:200]
+        # Seed path (CLI --create/--restore): also write the wallet FILE for the coins we did NOT
+        # start, so a later start_coin is password-free (mirrors provision_all's offline-provision
+        # at unlock in the packaged app, where bring_up_all runs with mnemonic=None).
+        if mnemonic is not None:
+            for t in self.daemons:
+                if t not in active:
+                    try:
+                        self.provision(t, mnemonic, passphrase, online=False)
+                    except Exception:
+                        pass
         # Initial bring-up is done: the supervisor may now keep crashed daemons alive
         # without racing the startup it would otherwise have collided with.
         self._supervision_enabled = True
+        self.schedule_dex_announce("bring-up")
         return errors
 
     # -- queries / aggregation --
     def rpc(self, ticker: str, command: str, *args, timeout: int = 60, stdin: Optional[str] = None):
-        req_id = f"rpc-{time.time_ns()}-{threading.get_ident()}"
-        started = time.monotonic()
-        _debug_plain_log("wallet_rpc_start", id=req_id, ticker=ticker, command=command,
-                         args=list(args), timeout=timeout, stdin=stdin)
-        try:
-            out = self._checked(self.daemons[ticker], command, *args, timeout=timeout, stdin=stdin)
-        except Exception as e:
-            _debug_plain_log("wallet_rpc_exception", id=req_id, ticker=ticker, command=command,
-                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                             args=list(args), timeout=timeout, stdin=stdin, error=repr(e))
-            raise
+        out = self._checked(self.daemons[ticker], command, *args, timeout=timeout, stdin=stdin)
         try:
             result = json.loads(out)
         except (ValueError, json.JSONDecodeError):
-            _debug_plain_log("wallet_rpc_ok", id=req_id, ticker=ticker, command=command,
-                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                             args=list(args), timeout=timeout, parsed_json=False, result=out)
             return out
-        _debug_plain_log("wallet_rpc_ok", id=req_id, ticker=ticker, command=command,
-                         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                         args=list(args), timeout=timeout, parsed_json=True, result=result)
         return result
 
     def first_address(self, ticker: str) -> Optional[str]:
@@ -1724,25 +2107,19 @@ class Orchestrator:
         push = str(push_amount or "").strip()
         if push:
             body["push_amount"] = push
-        _debug_plain_log("ln_open_start", ticker=ticker, body=body)
         try:
             result = self._drpc(ticker, "open_channel", body, timeout=150)
         except Exception as e:
-            _debug_plain_log("ln_open_exception", ticker=ticker, body=body, error=repr(e))
             raise
-        _debug_plain_log("ln_open_ok", ticker=ticker, body=body, result=result)
         return result
 
     def ln_close(self, ticker: str, channel_point: str, force: bool = False):
         body = {"channel_point": channel_point, "force": bool(force),
                 "password": self._wallet_pw(ticker)}
-        _debug_plain_log("ln_close_start", ticker=ticker, body=body)
         try:
             result = self._drpc(ticker, "close_channel", body, timeout=150)
         except Exception as e:
-            _debug_plain_log("ln_close_exception", ticker=ticker, body=body, error=repr(e))
             raise
-        _debug_plain_log("ln_close_ok", ticker=ticker, body=body, result=result)
         return result
 
     def ln_pay(self, ticker: str, invoice: str, *, timeout=None, max_cltv=None, max_fee_msat=None):
@@ -1753,28 +2130,20 @@ class Orchestrator:
             body["max_cltv"] = int(max_cltv)
         if max_fee_msat is not None:
             body["max_fee_msat"] = int(max_fee_msat)
-        _debug_plain_log("ln_pay_start", ticker=ticker, body=body)
         try:
             result = self._drpc(ticker, "lnpay", body, timeout=180)
         except Exception as e:
-            _debug_plain_log("ln_pay_exception", ticker=ticker, body=body, error=repr(e))
             raise
-        _debug_plain_log("ln_pay_ok", ticker=ticker, body=body, result=result)
         return result
 
     def ln_invoice(self, ticker: str, amount: str, memo: str = "", expiry: str = "3600"):
         # memo passed as --memo=<value> so arbitrary text (even a leading '-') is safe.
         self._ln_guard(str(amount), str(expiry))
-        _debug_plain_log("ln_invoice_start", ticker=ticker, amount=amount, memo=memo, expiry=expiry)
         try:
             result = self.rpc(ticker, "add_request", str(amount), "--lightning",
                               "--memo=" + str(memo), "--expiry", str(expiry), timeout=60)
         except Exception as e:
-            _debug_plain_log("ln_invoice_exception", ticker=ticker, amount=amount,
-                             memo=memo, expiry=expiry, error=repr(e))
             raise
-        _debug_plain_log("ln_invoice_ok", ticker=ticker, amount=amount, memo=memo,
-                         expiry=expiry, result=result)
         return result
 
     def ln_status(self, ticker: str) -> dict:
@@ -2083,6 +2452,10 @@ class Orchestrator:
         return self.network_settings(ticker)
 
     def getinfo(self, ticker: str) -> dict:
+        # A coin the user didn't start (or stopped) has no running daemon — report it as
+        # stopped without an RPC round-trip, so the dashboard greys it out cleanly.
+        if self.status.get(ticker) == "stopped":
+            return {"connected": False, "running": False, "status": "stopped", "server": None}
         # getinfo needs a network object; an offline (serverless) daemon can't answer it,
         # so synthesize a clear "not connected" status instead of erroring.
         if not self.is_online(ticker):
@@ -2387,7 +2760,7 @@ class Orchestrator:
     def _default_price_config(self) -> dict:
         # Nothing shipped/hardwired — the user adds their own named price APIs (link + jsonPath).
         return {
-            "version": 1, "enabled": False, "allow_private_hosts": False,
+            "version": 1, "enabled": False,
             "poll_seconds": DEFAULT_POLL_SECONDS,
             "display": {"fiatCurrency": "USD", "displayFiat": False},
             "sources": [],
@@ -2438,7 +2811,6 @@ class Orchestrator:
         if not isinstance(saved, dict):
             return cfg
         cfg["enabled"] = bool(saved.get("enabled"))
-        cfg["allow_private_hosts"] = bool(saved.get("allow_private_hosts"))
         try:
             cfg["poll_seconds"] = max(MIN_POLL_SECONDS, min(int(saved.get("poll_seconds")), MAX_POLL_SECONDS))
         except (TypeError, ValueError):
@@ -2477,7 +2849,6 @@ class Orchestrator:
         """(Re)build self.oracle + self._fx from self._prices. Caller holds _prices_lock
         (or single-threaded __init__). Disabled sources are skipped; order = priority."""
         cfg = self._prices
-        allow_private = bool(cfg.get("allow_private_hosts"))
         poll = float(cfg.get("poll_seconds") or DEFAULT_POLL_SECONDS)
         providers = []
         for s in cfg.get("sources", []):
@@ -2488,10 +2859,10 @@ class Orchestrator:
                 json_path=s.get("jsonPath") or "",
                 coin_ids={k.upper(): v for k, v in (s.get("coinIds") or {}).items()},
                 ids=s.get("ids") or "", api_key_header=(s.get("apiKeyHeader") or None),
-                api_key=(s.get("apiKey") or None), allow_private=allow_private)
+                api_key=(s.get("apiKey") or None))
             providers.append(prices.CachedProvider(prov, poll))
         self.oracle = prices.PriceOracle(providers)
-        self._fx = prices.FrankfurterFx(allow_private=allow_private)
+        self._fx = prices.FrankfurterFx()
 
     def _commit_prices(self) -> None:
         """Persist + rebuild the oracle. Caller holds _prices_lock."""
@@ -2552,7 +2923,6 @@ class Orchestrator:
             cfg = self._prices
             return {
                 "enabled": bool(cfg.get("enabled")),
-                "allow_private_hosts": bool(cfg.get("allow_private_hosts")),
                 "poll_seconds": int(cfg.get("poll_seconds") or DEFAULT_POLL_SECONDS),
                 "display": dict(cfg.get("display", {})),
                 "sources": [self._public_source(s) for s in cfg.get("sources", [])],
@@ -2562,13 +2932,6 @@ class Orchestrator:
     def set_price_enabled(self, enabled) -> dict:
         with self._prices_lock:
             self._prices["enabled"] = bool(enabled)
-            self._commit_prices()
-        self._refresh_price_snapshot()
-        return self.price_sources_public()
-
-    def set_allow_private_hosts(self, flag) -> dict:
-        with self._prices_lock:
-            self._prices["allow_private_hosts"] = bool(flag)
             self._commit_prices()
         self._refresh_price_snapshot()
         return self.price_sources_public()
@@ -2673,7 +3036,6 @@ class Orchestrator:
         coin/fiat and returns the extracted number (or an error), without saving anything."""
         cleaned = self._validate_source_spec(spec)
         with self._prices_lock:
-            allow_private = bool(self._prices.get("allow_private_hosts"))
             cur = self._prices["display"]["fiatCurrency"]
             stored = {s.get("id"): s.get("apiKey") for s in self._prices.get("sources", [])}
         fiat = (str(fiat).upper() if fiat else cur)
@@ -2683,8 +3045,7 @@ class Orchestrator:
         prov = prices.HttpTemplateProvider(
             role=role, url_template=cleaned["urlTemplate"], json_path=cleaned["jsonPath"],
             coin_ids=cleaned["coinIds"], ids=cleaned["ids"],
-            api_key_header=(cleaned["apiKeyHeader"] or None), api_key=api_key,
-            allow_private=allow_private)
+            api_key_header=(cleaned["apiKeyHeader"] or None), api_key=api_key)
         if role == "coin_btc":
             v = prov.price_btc(ticker)
         elif role == "btc_fiat":
@@ -2735,6 +3096,25 @@ class Orchestrator:
             "pending": format(_sum("unconfirmed", "unmatured"), "f"),
         }
 
+    def _ln_capacities(self) -> dict:
+        """Per-coin Lightning sendable/receivable sats for the sidebar + by-type header. Fast HTTP RPC
+        with a short timeout; coins without Lightning or open channels are omitted, so this never blocks
+        or bloats the 8s balance poll."""
+        out = {}
+        for t in self.daemons:
+            try:
+                cap = self._drpc(t, "lightning_capacity", {}, timeout=3)
+            except Exception:
+                continue
+            if not isinstance(cap, dict):
+                continue
+            cs = int(cap.get("can_send_sat") or 0)
+            cr = int(cap.get("can_receive_sat") or 0)
+            nch = int(cap.get("num_channels") or 0)
+            if cs or cr or nch:
+                out[t] = {"ln_can_send_sat": cs, "ln_can_receive_sat": cr, "ln_channels": nch}
+        return out
+
     def portfolio(self) -> dict:
         """Total balances across coins (confirmed + unconfirmed + unmatured), plus fiat
         valuation when the user has enabled a price source. NETWORK-FREE: fiat comes from the
@@ -2746,6 +3126,7 @@ class Orchestrator:
                 bals[ticker] = self._balance_parts(self.rpc(ticker, "getbalance"))
             except Exception:
                 bals[ticker] = {"amount": "0", "pending": "0"}   # not provisioned / not ready
+        ln = self._ln_capacities()
         fo = {t: dict(self._failover[t]["event"])
               for t in self.daemons if self._failover[t].get("event")}
         with self._prices_lock:
@@ -2757,7 +3138,8 @@ class Orchestrator:
         if not (enabled and snap):
             return {
                 "coins": {t: {"amount": b["amount"], "pending": b["pending"],
-                              "synced": self._synced_cache.get(t), "value_fiat": None}
+                              "synced": self._synced_cache.get(t), "value_fiat": None,
+                              **ln.get(t, {})}
                           for t, b in bals.items()},
                 "total": {"value_fiat": None},
                 "fiat": fiat, "display_fiat": display_fiat,
@@ -2776,7 +3158,7 @@ class Orchestrator:
                 except (InvalidOperation, TypeError, ValueError):
                     vf = None
             coins[t] = {"amount": a, "pending": b["pending"], "synced": self._synced_cache.get(t),
-                        "value_fiat": (str(vf) if vf is not None else None)}
+                        "value_fiat": (str(vf) if vf is not None else None), **ln.get(t, {})}
             if vf is not None:
                 total += vf
                 any_priced = True
@@ -2793,7 +3175,11 @@ class Orchestrator:
     def all_provisioned(self) -> bool:
         # "provisioned" = the wallet is loaded in its daemon this session (usable now),
         # not merely that a wallet file exists on disk (a relaunch starts unloaded).
-        return bool(self.daemons) and all(t in self._loaded for t in self.daemons)
+        # Only the coins MEANT to be running count — deliberately-stopped coins are never
+        # loaded, so they must not hold this gate open. Pre-bring-up (_active empty) falls
+        # back to all daemons so it reads False until the active set is loaded.
+        active = self._active or set(self.daemons)
+        return bool(active) and all(t in self._loaded for t in active)
 
     def _verify_seed_match(self, ticker: str, mnemonic: str, passphrase: str = "") -> None:
         """Guard against a stale wallet from a DIFFERENT seed silently surviving a
@@ -2879,6 +3265,18 @@ class Orchestrator:
             self._mark_detail(ticker, "ready", self._current_host(ticker))
             self._mark_coin(ticker, "done")
             return
+        # A coin the user did NOT auto-start has no running daemon. Provision its wallet FILE
+        # offline (so a later start_coin is password-free, using the in-memory session key) but
+        # do not load it (no daemon to load into). Mark it 'stopped' — startable on demand.
+        if ticker not in self._active:
+            try:
+                self.provision(ticker, mnemonic, passphrase, online=False)
+            except Exception as e:
+                errors[ticker] = str(e)[:200]
+            self.status[ticker] = "stopped"
+            self._mark_detail(ticker, "stopped", None)
+            self._mark_coin(ticker, "done")   # 'done' for the progress bar = no longer connecting
+            return
         try:
             self._mark_detail(ticker, "connecting", None)
             self.provision(ticker, mnemonic, passphrase, online=True)   # daemons already up
@@ -2953,6 +3351,7 @@ class Orchestrator:
                        for t in tickers]
             for fut in concurrent.futures.as_completed(futures):
                 fut.result()   # _provision_one swallows per-coin errors; this won't raise
+        self.schedule_dex_announce("unlock")
         return errors
 
     def history(self, ticker: str) -> list:
@@ -3030,12 +3429,22 @@ class Orchestrator:
         return merged[:limit]
 
     # -- supervision --
-    def daemon_alive(self, ticker: str) -> bool:
+    def daemon_alive(self, ticker: str, timeout: float = 10.0) -> bool:
         """Liveness via the RPC (POSIX ``daemon -d`` double-forks, so the launcher PID
         is not a reliable signal there — a reachable ``list_wallets`` is, and unlike ``getinfo`` it
         answers for offline daemons too)."""
-        r = self._run(self.daemons[ticker], "list_wallets", timeout=10)
+        r = self._run(self.daemons[ticker], "list_wallets", timeout=timeout)
         return r.returncode == 0 and bool(r.stdout.strip())
+
+    def daemon_accepts_current_rpc(self, ticker: str, timeout: float = 2.0) -> bool:
+        """True when a live daemon accepts this orchestrator's in-memory RPC password.
+        Source-mode restarts can leave a detached daemon alive with the previous backend's
+        rpcpassword; the CLI may still reach it via the old config, but direct JSON-RPC cannot."""
+        try:
+            self._drpc(ticker, "list_wallets", {}, timeout=timeout)
+            return True
+        except Exception:
+            return False
 
     def ensure_running(self, ticker: str, ready_timeout: float = 45.0) -> bool:
         """Restart the coin's daemon if its RPC is unreachable, honouring a per-coin
@@ -3044,6 +3453,8 @@ class Orchestrator:
         for a later supervisor pass rather than raising. Returns True only on a
         successful (re)start. Assumes ``configure``/``provision`` already ran once."""
         if self._stopping:                       # tearing down -> never (re)start
+            return False
+        if ticker not in self._active:           # deliberately stopped / never-started -> don't resurrect
             return False
         d = self.daemons[ticker]
         if self.daemon_alive(ticker):
@@ -3244,14 +3655,19 @@ class Orchestrator:
         Ping-based 'closest server' selection (configure) + dead-daemon restart still apply."""
         if self._stopping or not self._supervision_enabled:
             return []
+        # Only supervise coins MEANT to be running (self._active); deliberately-stopped /
+        # never-started coins have no daemon and must not be auto-restarted or RPC-probed.
         # Skip ensure_running for a coin whose failover is in flight — the worker owns its daemon.
         restarted = [t for t in self.daemons
-                     if not self._failover[t]["in_flight"] and self.ensure_running(t)]
+                     if t in self._active
+                     and not self._failover[t]["in_flight"] and self.ensure_running(t)]
         # Refresh each coin's is_synchronized flag so the dashboard can show 'syncing' vs 'pending'.
         now = time.monotonic()
         if now - self._last_synced_poll >= SYNCED_POLL_INTERVAL:
             self._last_synced_poll = now
             for t in self.daemons:
+                if t not in self._active:
+                    continue
                 try:
                     self._synced_cache[t] = self._synced_now(t)
                 except Exception:
@@ -3279,3 +3695,102 @@ class Orchestrator:
         self.clear_session_keys()   # drop the in-memory wallet/contacts keys on shutdown
         for ticker in list(self.daemons):
             self.stop(ticker)
+
+    # -- on-demand per-coin start/stop (post-startup) --
+    def _coin_state(self, ticker: str) -> dict:
+        return {
+            "ticker": ticker,
+            "status": self.status.get(ticker),
+            "running": self.daemon_alive(ticker),
+            "loaded": ticker in self._loaded,
+            "needs_unlock": self.is_provisioned(ticker) and self.locked(),
+        }
+
+    def _load_started_coin_wallet(self, ticker: str) -> None:
+        """Load an already-provisioned coin wallet into a running daemon for this unlocked session.
+        On-demand starts can race with an already-running detached daemon; the daemon being alive is
+        not enough if its wallet list is still empty."""
+        if ticker in self._loaded or not self.is_provisioned(ticker) or self.locked():
+            return
+        if self._wallet_is_encrypted(ticker):
+            self.load(ticker)
+        else:
+            self._checked(self.daemons[ticker], "load_wallet", timeout=30)
+            self._loaded.add(ticker)
+            self.ensure_encrypted(ticker)
+
+    def _announce_coin_change(self, event: str, ticker: str) -> None:
+        """If a DEX is paired, audit + re-announce so the DEX picks up/drops this coin.
+        Fire-and-forget: the announce worker is async and its inflight guard debounces rapid
+        toggles; never blocks the start/stop call."""
+        with self._dex_integration_lock:
+            if not (self._dex_integration.get("allow_local_dex")
+                    and self._normalize_dex_id(self._dex_integration.get("trusted_dex_id"))):
+                return
+        self._record_dex_funding_audit({"event": event, "ticker": ticker})
+        self.schedule_dex_announce(event, require_startup_auto=False)
+
+    def start_coin(self, ticker: str, ready_timeout: float = 45.0) -> dict:
+        """Start a coin's daemon ON DEMAND (post-startup) and load its already-provisioned wallet
+        using the in-memory session key — no vault password needed. Marks the coin active so the
+        supervisor keeps it alive, then re-announces to a connected DEX. Idempotent; start() is
+        self-guarded + idempotent so this needs no outer lock."""
+        if ticker not in self.daemons:
+            raise KeyError(ticker)
+        self._active.add(ticker)          # before any wait: a supervisor tick now keeps it alive
+        if self.daemon_accepts_current_rpc(ticker):
+            try:
+                self._load_started_coin_wallet(ticker)
+            except Exception as e:
+                self.status[ticker] = "failed"
+                raise RuntimeError(f"{ticker} daemon is running but wallet could not be loaded: {e}") from e
+            self.status[ticker] = "ready"
+            self._announce_coin_change("coin-start", ticker)
+            return self._coin_state(ticker)
+        self.configure(ticker)
+        self.status[ticker] = "starting"
+        d = self.daemons[ticker]
+        d.backoff, d.next_retry = 1.0, 0.0   # fresh start, not a back-off restart
+        self.start(ticker)
+        if not self.wait_ready(ticker, timeout=ready_timeout):
+            self.status[ticker] = "failed"    # left active -> supervisor retries with back-off
+            raise RuntimeError(f"{ticker} daemon did not become ready in {ready_timeout}s")
+        self._inject_ln_fees(ticker)
+        # Load the already-provisioned wallet with the in-memory session password (no mnemonic).
+        # If the session is soft-locked (no keys), the daemon stays up but unloaded until unlock.
+        try:
+            self._load_started_coin_wallet(ticker)
+        except Exception as e:
+            self.status[ticker] = "failed"
+            raise RuntimeError(f"{ticker} daemon started but wallet could not be loaded: {e}") from e
+        if ticker in self._loaded:
+            threading.Thread(target=self._connect_ln_hub, args=(ticker,), name=f"ln-hub-{ticker}", daemon=True).start()
+        self.status[ticker] = "ready"
+        self._synced_cache[ticker] = self._synced_now(ticker)
+        self._announce_coin_change("coin-start", ticker)
+        return self._coin_state(ticker)
+
+    def stop_coin(self, ticker: str, force: bool = False) -> dict:
+        """Stop ONE coin's daemon on demand and mark it inactive so the supervisor won't
+        resurrect it. The wallet file stays on disk (startable again later). When the DEX is
+        connected, refuse unless force=True (the UI confirms), then announce the change FIRST so
+        the DEX cancels/withdraws this coin's orders before its daemon goes away."""
+        if ticker not in self.daemons:
+            raise KeyError(ticker)
+        with self._dex_integration_lock:
+            dex_live = self._dex_connected_locked()
+            dex_paired = bool(self._dex_integration.get("allow_local_dex")
+                              and self._normalize_dex_id(self._dex_integration.get("trusted_dex_id")))
+        if dex_live and not force:
+            raise DexOrdersActiveError(ticker)
+        self._active.discard(ticker)      # gate the supervisor BEFORE stopping
+        if dex_paired:
+            self._record_dex_funding_audit({"event": "coin-stop", "ticker": ticker})
+            self.schedule_dex_announce("coin-stop", require_startup_auto=False)   # DEX reconciles via /dex/ready (now stopped)
+        d = self.daemons[ticker]
+        with self._start_guard(d):        # serialize vs an in-flight supervisor (re)start
+            self.stop(ticker)
+        self._loaded.discard(ticker)
+        self.status[ticker] = "stopped"
+        self._synced_cache[ticker] = None
+        return self._coin_state(ticker)

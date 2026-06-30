@@ -6,7 +6,7 @@
 // 'electrum:api' IPC handler below, which verifies the backend's identity and
 // attaches the per-launch bearer token. nodeIntegration stays off.
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, dialog } = require('electron')
 const path = require('path')
 const crypto = require('crypto')
 const http = require('http')
@@ -129,6 +129,37 @@ ipcMain.handle('electrum:api', (_event, msg) => {
   return backendRequest({ method, path: reqPath, body: msg.body })
 })
 
+ipcMain.handle('electrum:backup-save-dialog', async () => {
+  const stamp = new Date().toISOString().slice(0, 10)
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Blakestream wallet backup',
+    defaultPath: `Blakestream-Wallet-Backup-${stamp}.bswallet`,
+    filters: [
+      { name: 'Blakestream wallet backup', extensions: ['bswallet'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  return result.canceled ? null : result.filePath
+})
+
+ipcMain.handle('electrum:backup-open-dialog', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Restore Blakestream wallet backup',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Blakestream wallet backup', extensions: ['bswallet'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  return result.canceled ? null : result.filePaths[0]
+})
+
+ipcMain.handle('electrum:relaunch', () => {
+  app.relaunch()
+  app.exit(0)
+  return true
+})
+
 let mainWindow = null
 let backend = null
 let tray = null // system-tray indicator; module-scoped so it isn't garbage-collected (which hides it)
@@ -161,12 +192,13 @@ function startBackend() {
     TMP: process.env.TMP,
     ELECTRUM_API_TOKEN: API_TOKEN,
   }
-  // Keep the backend's output for support (userData is writable and Electron creates it).
+  // Keep only Electron-side lifecycle notes for support. Do not pipe raw backend
+  // stdout/stderr here; test builds used verbose plaintext backend logs, but
+  // production should not persist request bodies, wallet data, or RPC details.
   const logPath = path.join(app.getPath('userData'), 'backend.log')
-  const fd = require('fs').openSync(logPath, 'a')
-  backend = spawn(supervisor, ['--backend-dir', daemons, '--datadirs', datadirs, 'multi', '--serve'],
-    { stdio: ['ignore', fd, fd], env })
   const note = (msg) => { try { require('fs').appendFileSync(logPath, `\n[main] ${msg}\n`) } catch (e) { /* ignore */ } }
+  backend = spawn(supervisor, ['--backend-dir', daemons, '--datadirs', datadirs, 'multi', '--serve'],
+    { stdio: ['ignore', 'ignore', 'ignore'], env })
   // A missing binary throws 'error'; a crash or an EADDRINUSE (port-squatted) exit fires
   // 'exit'. Without these the failure is silent and the UI just spins. Record it, and
   // force a re-handshake so a replacement backend can't be trusted on stale state.

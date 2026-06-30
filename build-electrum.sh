@@ -15,6 +15,7 @@ COIN_COUNT=0
 TARGET_COUNT=0
 BUILD_MULTI=0
 DRY_RUN=0
+JOBS="${ELECTRUM_BUILD_JOBS:-1}"
 
 usage() {
     cat <<'EOF'
@@ -36,6 +37,7 @@ If no target is given:
   macOS host               -> macos
 
 Options:
+  -j N | --jobs N | --jobs=N       build up to N standalone Linux/Windows wallets at once
   --dry-run                        print build commands without running them
   -h | --help                      show this help
 
@@ -92,11 +94,25 @@ normalize_arg() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+# No arguments: show the usage (available products + targets) and exit, rather than
+# guessing and starting a build. The caller must pick what to build.
+if [ $# -eq 0 ]; then
+    usage
+    exit 0
+fi
+
 while [ $# -gt 0 ]; do
     arg="$(normalize_arg "$1")"
     case "$arg" in
         -h|--help) usage; exit 0 ;;
         --dry-run|-dry-run) DRY_RUN=1 ;;
+        -j|--jobs|-jobs)
+            shift
+            [ $# -gt 0 ] || die "$arg requires a number"
+            JOBS="$1"
+            ;;
+        --jobs=*|-jobs=*) JOBS="${1#*=}" ;;
+        -j[0-9]*) JOBS="${arg#-j}" ;;
 
         -blc|--blc) add_coin BLC ;;
         -bbtc|--bbtc) add_coin BBTC ;;
@@ -115,6 +131,11 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+case "$JOBS" in
+    ''|*[!0-9]*) die "--jobs must be a positive integer" ;;
+    0) die "--jobs must be at least 1" ;;
+esac
 
 if [ "$COIN_COUNT" -eq 0 ] && [ "$BUILD_MULTI" -eq 0 ]; then
     usage >&2
@@ -186,19 +207,106 @@ coin_list="(none)"
 echo "products: singles=$coin_list multi=$BUILD_MULTI"
 echo "targets: ${TARGETS[*]}"
 [ "$DRY_RUN" -eq 1 ] && echo "mode: dry-run"
+echo "standalone jobs: $JOBS"
+
+output_kind_for_target() {
+    case "$1" in
+        linux) echo linux ;;
+        windows) echo windows ;;
+        macos) echo macos ;;
+        wheel) echo python ;;
+    esac
+}
+
+effective_jobs_for_target() {
+    case "$1" in
+        linux|windows) echo "$JOBS" ;;
+        *) echo 1 ;;
+    esac
+}
+
+run_single_build() {
+    local coin="$1" target="$2" single_target="$3" out_kind="$4"
+    echo
+    echo "==================== standalone $coin / $target ===================="
+    run_cmd "$REPO_ROOT/scripts/build_wallet_variant.sh" "$coin" "$single_target"
+    write_sha256sums "$REPO_ROOT/outputs/$coin/$out_kind"
+}
+
+run_single_build_logged() {
+    local coin="$1" target="$2" single_target="$3" out_kind="$4"
+    local log_dir="$REPO_ROOT/build/logs/build-electrum/$target"
+    local log="$log_dir/$coin.log"
+    mkdir -p "$log_dir"
+    echo "  started: $coin / $target (log: $log)"
+    (
+        run_single_build "$coin" "$target" "$single_target" "$out_kind"
+    ) >"$log" 2>&1
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "  ok: $coin / $target"
+    else
+        echo "  FAILED: $coin / $target (rc=$rc, log: $log)" >&2
+        tail -80 "$log" >&2 || true
+    fi
+    return "$rc"
+}
+
+wait_for_batch() {
+    local rc=0 status pid
+    for pid in "$@"; do
+        if wait "$pid"; then
+            status=0
+        else
+            status=$?
+        fi
+        if [ "$status" -ne 0 ]; then
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+run_single_builds_for_target() {
+    local target="$1" single_target="$2" out_kind="$3"
+    local target_jobs
+    target_jobs="$(effective_jobs_for_target "$target")"
+
+    if [ "$target_jobs" -le 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+        local coin
+        for coin in "${COINS[@]}"; do
+            run_single_build "$coin" "$target" "$single_target" "$out_kind"
+        done
+        return 0
+    fi
+
+    echo
+    echo "==================== standalone / $target (jobs=$target_jobs) ===================="
+    local -a pids=()
+    local batch_count=0
+    local rc=0
+    local coin
+    for coin in "${COINS[@]}"; do
+        run_single_build_logged "$coin" "$target" "$single_target" "$out_kind" &
+        pids+=("$!")
+        batch_count=$((batch_count + 1))
+        if [ "$batch_count" -ge "$target_jobs" ]; then
+            wait_for_batch "${pids[@]}" || rc=1
+            pids=()
+            batch_count=0
+        fi
+    done
+    if [ "$batch_count" -gt 0 ]; then
+        wait_for_batch "${pids[@]}" || rc=1
+    fi
+    return "$rc"
+}
 
 for target in "${TARGETS[@]}"; do
     single_target="$(target_for_single "$target")"
     if [ "$COIN_COUNT" -gt 0 ]; then
-        for coin in "${COINS[@]}"; do
-            echo
-            echo "==================== standalone $coin / $target ===================="
-            run_cmd "$REPO_ROOT/scripts/build_wallet_variant.sh" "$coin" "$single_target"
-            out_kind="$target"
-            [ "$target" = "linux" ] && out_kind="linux"
-            [ "$target" = "wheel" ] && out_kind="python"
-            write_sha256sums "$REPO_ROOT/outputs/$coin/$out_kind"
-        done
+        out_kind="$(output_kind_for_target "$target")"
+        run_single_builds_for_target "$target" "$single_target" "$out_kind"
     fi
 
     if [ "$BUILD_MULTI" -eq 1 ]; then

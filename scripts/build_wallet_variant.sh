@@ -140,9 +140,13 @@ build_appimage() {
 
 build_windows() {
     local ws="$WORKSPACE_ROOT/$COIN/windows"
+    local lc; lc="$(lower_coin)"
     prepare_workspace "$ws"
     smoke_constants "$ws" || echo "  (constants smoke skipped — prepare step already validated)"
-    ( cd "$ws" && ./contrib/build-wine/build.sh )
+    ( cd "$ws" && \
+        ELECTRUM_WINE_IMAGE_NAME="electrum-$lc-wine-builder-img" \
+        ELECTRUM_WINE_CONTAINER_NAME="electrum-$lc-wine-builder-cont" \
+        ./contrib/build-wine/build.sh )
     # wine emits generic electrum-<ver>{,-portable,-setup}.exe; rebrand per-coin.
     local d="$ws/contrib/build-wine/dist" f base
     shopt -s nullglob

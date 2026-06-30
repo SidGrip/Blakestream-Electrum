@@ -11,4 +11,11 @@ contextBridge.exposeInMainWorld('electrum', {
     get: (path) => ipcRenderer.invoke('electrum:api', { method: 'GET', path }),
     post: (path, body) => ipcRenderer.invoke('electrum:api', { method: 'POST', path, body }),
   },
+  backup: {
+    pickSavePath: () => ipcRenderer.invoke('electrum:backup-save-dialog'),
+    pickOpenPath: () => ipcRenderer.invoke('electrum:backup-open-dialog'),
+  },
+  app: {
+    relaunch: () => ipcRenderer.invoke('electrum:relaunch'),
+  },
 })

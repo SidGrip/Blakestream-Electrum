@@ -34,7 +34,7 @@ export default function ErrorOverlay({
       <div
         className="error-overlay"
         style={{
-          maxWidth: 360, maxHeight: '80%', overflow: 'hidden', textAlign: 'center',
+          maxWidth: 'min(560px, 92%)', maxHeight: '80%', overflow: 'hidden', textAlign: 'center',
           color: palette.color, fontSize: 14, fontWeight: 600, lineHeight: 1.5,
           whiteSpace: 'pre-line', overflowWrap: 'anywhere', wordBreak: 'break-word',
           background: palette.bg, border: `1px solid ${palette.border}`,

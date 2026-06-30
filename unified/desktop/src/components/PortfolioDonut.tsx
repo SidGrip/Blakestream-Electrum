@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts'
-import type { TooltipProps } from 'recharts'
 import { resolveCoinColor } from '../types'
 import { useStore } from '../store'
 import { formatFiat } from '../explorer'
@@ -19,13 +18,18 @@ interface Slice {
   color: string
 }
 
+type DonutTooltipProps = {
+  active?: boolean
+  payload?: Array<{ payload?: Slice & { percent: number } }>
+}
+
 function toNumber(v: string | null | undefined): number {
   if (v == null) return 0
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
 }
 
-function DonutTooltip({ active, payload }: TooltipProps<number, string>) {
+function DonutTooltip({ active, payload }: DonutTooltipProps) {
   if (!active || !payload || payload.length === 0) return null
   const datum = payload[0]?.payload as (Slice & { percent: number }) | undefined
   if (!datum) return null
@@ -56,8 +60,10 @@ function DonutTooltip({ active, payload }: TooltipProps<number, string>) {
 export default function PortfolioDonut() {
   const portfolio = useStore((s) => s.portfolio)
   const overrides = useStore((s) => s.coinColorOverrides)
-  const coinFiatMode = useStore((s) => s.coinFiatMode)
+  const balanceView = useStore((s) => s.balanceView)
   const fiatCurrency = useStore((s) => s.fiatCurrency)
+  const open = useStore((s) => s.allocationOpen)
+  const setOpen = useStore((s) => s.setAllocationOpen)
 
   const { slices, total, anyFiat } = useMemo(() => {
     const empty = { slices: [] as Slice[], total: 0, fiatWeighted: false, anyFiat: false }
@@ -69,9 +75,9 @@ export default function PortfolioDonut() {
     const allPriced =
       positiveAmount.length > 0 &&
       positiveAmount.every(([, c]) => c.value_fiat != null && toNumber(c.value_fiat) > 0)
-    const allFiat = positiveAmount.length > 0 && positiveAmount.every(([t]) => coinFiatMode[t])
+    const allFiat = balanceView === 'fiat'
     const useFiat = allFiat && allPriced
-    const anyFiat = positiveAmount.some(([t]) => coinFiatMode[t])
+    const anyFiat = allFiat
 
     const built: Slice[] = entries.map(([ticker, c]) => ({
       ticker,
@@ -83,7 +89,7 @@ export default function PortfolioDonut() {
     const sum = positive.reduce((acc, s) => acc + s.value, 0)
 
     return { slices: positive, total: sum, fiatWeighted: useFiat, anyFiat }
-  }, [portfolio, overrides, coinFiatMode])
+  }, [portfolio, overrides, balanceView])
 
   const hasSlices = slices.length > 0 && total > 0
 
@@ -106,6 +112,7 @@ export default function PortfolioDonut() {
         flexDirection: 'column',
         gap: 10,
         minWidth: 0,
+        flex: '0 0 auto', // keep natural height; the coin list (flex:1) is the only thing that scrolls
       }}
     >
       {anyFiat && (
@@ -124,61 +131,68 @@ export default function PortfolioDonut() {
         </div>
       )}
 
-      <div
-        style={{ color: MUTED, fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase' }}
-        title="Holdings allocation"
-      >
-        Allocation
-      </div>
-
-      <div
+      {/* Collapsible header: chevron + "Allocation"; collapsed by default, remembered. */}
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        title={open ? 'Hide allocation' : 'Show allocation'}
         style={{
-          position: 'relative',
-          width: '100%',
-          height: SIZE,
+          display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+          background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+          color: MUTED, fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase',
+          font: 'inherit', textAlign: 'left',
         }}
       >
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            {hasSlices && <Tooltip content={<DonutTooltip />} cursor={false} />}
-            <Pie
-              data={chartData}
-              dataKey="value"
-              nameKey="ticker"
-              innerRadius={INNER}
-              outerRadius={OUTER}
-              paddingAngle={hasSlices ? 2 : 0}
-              stroke="none"
-              isAnimationActive={false}
-            >
-              {chartData.map((d, i) => (
-                <Cell key={`${d.ticker}-${i}`} fill={d.color} />
-              ))}
-            </Pie>
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
+        <span style={{ display: 'inline-block', width: 10, transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }}>▸</span>
+        Allocation
+      </button>
 
-      {hasSlices ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
-          {chartData.map((d) => (
-            <div key={d.ticker} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, minWidth: 0 }}>
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: d.color,
-                  flex: '0 0 auto',
-                }}
-              />
-              <span style={{ color: TEXT }}>{d.ticker}</span>
-              <span style={{ color: MUTED }}>{d.percent.toFixed(1)}%</span>
+      {open && (
+        <>
+          <div style={{ position: 'relative', width: '100%', height: SIZE }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                {hasSlices && <Tooltip content={<DonutTooltip />} cursor={false} />}
+                <Pie
+                  data={chartData}
+                  dataKey="value"
+                  nameKey="ticker"
+                  innerRadius={INNER}
+                  outerRadius={OUTER}
+                  paddingAngle={hasSlices ? 2 : 0}
+                  stroke="none"
+                  isAnimationActive={false}
+                >
+                  {chartData.map((d, i) => (
+                    <Cell key={`${d.ticker}-${i}`} fill={d.color} />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+
+          {hasSlices ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
+              {chartData.map((d) => (
+                <div key={d.ticker} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, minWidth: 0 }}>
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: d.color,
+                      flex: '0 0 auto',
+                    }}
+                  />
+                  <span style={{ color: TEXT }}>{d.ticker}</span>
+                  <span style={{ color: MUTED }}>{d.percent.toFixed(1)}%</span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      ) : (
-        <div style={{ color: MUTED, fontSize: 12, textAlign: 'center' }}>no holdings yet</div>
+          ) : (
+            <div style={{ color: MUTED, fontSize: 12, textAlign: 'center' }}>no holdings yet</div>
+          )}
+        </>
       )}
     </div>
   )

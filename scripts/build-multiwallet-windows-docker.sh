@@ -48,8 +48,15 @@ if [ "$INSIDE" -eq 0 ]; then
 FROM sidgrip/electrum-wine-base:25.2
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
+ARG NODE_VERSION=22.23.0
 RUN apt-get update -q && apt-get install -qy --no-install-recommends \
-        nodejs npm zip xz-utils python3-venv \
+        curl zip xz-utils python3-venv \
+    && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+    && grep " node-v${NODE_VERSION}-linux-x64.tar.xz\$" SHASUMS256.txt | sha256sum -c - \
+    && tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
+    && rm -f "node-v${NODE_VERSION}-linux-x64.tar.xz" SHASUMS256.txt \
+    && node --version && npm --version \
     && rm -rf /var/lib/apt/lists/*
 ARG UID=1000
 RUN if ! getent passwd "$UID" >/dev/null; then \
@@ -124,8 +131,21 @@ ensure_wine_prefix_owner() {
     fi
 }
 
+ensure_repo_git_metadata_for_wine() {
+    if git -C "$REPO_ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "== creating temporary git metadata for Wine PyInstaller tag =="
+    git -C "$REPO_ROOT" init -q
+    git -C "$REPO_ROOT" config user.email "builder@localhost"
+    git -C "$REPO_ROOT" config user.name "Electrium Multiwallet Builder"
+    git -C "$REPO_ROOT" commit --allow-empty -q -m "temporary multiwallet build metadata"
+}
+
 ensure_wine_python() {
     ensure_wine_prefix_owner
+    ensure_repo_git_metadata_for_wine
     mkdir -p "$CACHEDIR" "$DLL_TARGET_DIR" "$PIP_CACHE_DIR" "$BUILD_ROOT"
     if ! ls "$DLL_TARGET_DIR"/libsecp256k1-*.dll >/dev/null 2>&1; then
         "$CONTRIB/make_libsecp256k1.sh"
@@ -152,12 +172,14 @@ ensure_wine_python() {
 }
 
 ensure_wine_deps() {
-    local requirements_win blake256_win
+    local requirements_win requirements_hw_win blake256_win
     requirements_win="$(win_path "$REPO_ROOT/contrib/requirements/requirements.txt")"
+    requirements_hw_win="$(win_path "$REPO_ROOT/contrib/requirements/requirements-hw.txt")"
     blake256_win="$(win_path "$REPO_ROOT/blake256")"
     wine_python -m pip install --upgrade pip setuptools wheel pyinstaller
     wine_python -m pip install -r "$requirements_win"
-    wine_python -m pip install "cryptography==45.0.3" "pycryptodomex>=3.7" "argon2-cffi>=21.3"
+    wine_python -m pip install -r "$requirements_hw_win"
+    wine_python -m pip install "cryptography==48.0.1" "pycryptodomex==3.23.0" "argon2-cffi==25.1.0"
     wine_python -m pip install "$blake256_win"
     cp -f "$DLL_TARGET_DIR"/libsecp256k1-*.dll "$WINEPREFIX/drive_c/python3/Lib/site-packages/electrum_ecc/"
 }
@@ -241,7 +263,8 @@ stage_backend() {
 
 build_desktop() {
     ( cd "$DESKTOP" \
-        && npm install \
+        && rm -rf release \
+        && if [ -f package-lock.json ]; then npm ci; else npm install; fi \
         && npm run build \
         && npx electron-builder --win portable nsis --x64 --config.directories.output=release )
 }

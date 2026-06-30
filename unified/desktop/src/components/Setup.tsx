@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useStore } from '../store'
+import { pickBackupOpenPath, relaunchApp, restoreWalletBackup } from '../api'
 import SeedInput from './SeedInput'
 import './setup.css'
 
-type Mode = 'create' | 'restore'
+type Mode = 'create' | 'restore' | 'backup'
 
 const WORD_COUNTS = [12, 15, 18, 21, 24]
 
@@ -18,6 +19,8 @@ export default function Setup() {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [seedWords, setSeedWords] = useState<string[]>([])
+  const [backupPath, setBackupPath] = useState('')
+  const [restoreDone, setRestoreDone] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [newMnemonic, setNewMnemonic] = useState<string | null>(null)
@@ -59,6 +62,31 @@ export default function Setup() {
     try {
       await restoreWallet(password, seedWords.join(' '))
       await openWallet()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setEnrolling(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const chooseBackup = async () => {
+    setError(null)
+    const path = await pickBackupOpenPath()
+    if (path) setBackupPath(path)
+  }
+
+  const onRestoreBackup = async () => {
+    setError(null)
+    if (!backupPath) return setError('Choose a .bswallet backup file.')
+    if (!password) return setError('Enter the wallet password used when this backup was created.')
+    setBusy(true)
+    setEnrolling(true)
+    try {
+      await restoreWalletBackup(password, backupPath)
+      setRestoreDone(true)
+      const relaunched = await relaunchApp()
+      if (!relaunched) setError('Backup restored. Close and reopen Blakestream Wallet to load it.')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setEnrolling(false)
@@ -112,10 +140,13 @@ export default function Setup() {
         <h1 className="setup-title">BLAKESTREAM WALLET</h1>
         <div className="setup-tabs">
           <button className={mode === 'create' ? 'active' : ''} onClick={() => setMode('create')}>
-            Create new
+            Create new wallet
           </button>
           <button className={mode === 'restore' ? 'active' : ''} onClick={() => setMode('restore')}>
-            Restore
+            Restore from seed
+          </button>
+          <button className={mode === 'backup' ? 'active' : ''} onClick={() => setMode('backup')}>
+            Restore from backup file
           </button>
         </div>
         <p className="setup-muted">One key for all six coins — BLC, BBTC, ELT, LIT, PHO, UMO.</p>
@@ -124,10 +155,27 @@ export default function Setup() {
           <SeedInput onChange={(words) => setSeedWords(words)} />
         )}
 
+        {mode === 'backup' && (
+          <div className="setup-backup-box">
+            <p>
+              Restore a full Blakestream Wallet backup, including the encrypted vault, per-coin wallet files,
+              contacts, settings, and Lightning channel state saved in those wallet files.
+            </p>
+            <p>
+              Enter the wallet password that was active when the backup was created. That same password
+              encrypts the backup file and unlocks the restored wallet.
+            </p>
+            <button type="button" className="setup-secondary-btn" onClick={chooseBackup} disabled={busy}>
+              Choose backup file
+            </button>
+            {backupPath && <div className="setup-path" title={backupPath}>{backupPath}</div>}
+          </div>
+        )}
+
         <input
           className="setup-input"
           type="password"
-          placeholder="Wallet password"
+          placeholder={mode === 'backup' ? 'Backup wallet password' : 'Wallet password'}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="off"
@@ -144,11 +192,12 @@ export default function Setup() {
         )}
 
         {error && <div className="setup-error">{error}</div>}
+        {restoreDone && <div className="setup-success">Backup restored. Restarting wallet…</div>}
 
         <button
           className="setup-btn"
           disabled={busy}
-          onClick={mode === 'create' ? onCreate : onRestore}
+          onClick={mode === 'create' ? onCreate : mode === 'restore' ? onRestore : onRestoreBackup}
         >
           {busy ? (
             <>
@@ -157,6 +206,8 @@ export default function Setup() {
             </>
           ) : mode === 'create' ? (
             'Create wallet'
+          ) : mode === 'backup' ? (
+            'Restore backup file'
           ) : (
             'Restore wallet'
           )}

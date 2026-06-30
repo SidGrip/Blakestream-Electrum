@@ -25,13 +25,17 @@ export default function CoinDetail() {
   const activeTab = useStore((s) => s.activeTab)
   const connected = useStore((s) => s.connected)
   const setActiveTab = useStore((s) => s.setActiveTab)
-  const coinFiatMode = useStore((s) => s.coinFiatMode)
+  const setLightningMode = useStore((s) => s.setLightningMode)
   const fiatCurrency = useStore((s) => s.fiatCurrency)
   const priceApiConfigured = useStore((s) => s.priceApiConfigured)
-  const toggleAllFiatFrom = useStore((s) => s.toggleAllFiatFrom)
+  const coinStatus = useStore((s) => s.coinStatus)
+  const startCoin = useStore((s) => s.startCoin)
 
   // A "Pay" click from Contacts stashes the address here, switches to Send.
   const [payPrefill, setPayPrefill] = useState<string | undefined>(undefined)
+  // Global balance view (coin / Lightning / fiat) shared with the left rail; the toggle cycles it.
+  const balanceView = useStore((s) => s.balanceView)
+  const cycleBalanceView = useStore((s) => s.cycleBalanceView)
 
   const tickers = Object.keys(coins ?? {})
   const coin = selected && coins?.[selected] ? selected : tickers[0]
@@ -43,6 +47,9 @@ export default function CoinDetail() {
   useEffect(() => {
     setPayPrefill(undefined)
   }, [coin])
+  useEffect(() => {
+    if (activeTab === 'lightning') setLightningMode('simple')
+  }, [activeTab, setLightningMode])
 
   if (!coin || !coins) {
     return (
@@ -51,13 +58,53 @@ export default function CoinDetail() {
   }
 
   const meta = coins[coin]
+
+  // A coin the user didn't start (or stopped) has no running daemon — show a Start call-to-action
+  // instead of the balance header/tabs (which would query a dead daemon and spam errors).
+  const runState = coinStatus[coin] ?? 'running'
+  if (runState !== 'running') {
+    const starting = runState === 'starting'
+    return (
+      <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+        <div style={{ ...card, maxWidth: 420, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+          <span style={{ filter: runState === 'stopped' ? 'grayscale(1)' : undefined }}>
+            <CoinIcon ticker={coin} size={48} />
+          </span>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#e6e6e6' }}>{meta?.coin_name ?? coin}</div>
+          <div style={{ fontSize: 13, color: '#8a929b' }}>
+            {runState === 'failed' ? `Couldn't start ${coin}.` : `This wallet isn't started.`}
+          </div>
+          <button
+            type="button"
+            style={{ ...primaryBtn, opacity: starting ? 0.7 : 1 }}
+            disabled={starting}
+            onClick={() => void startCoin(coin)}
+          >
+            {starting ? 'Starting…' : runState === 'failed' ? 'Retry' : 'Start wallet'}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   const canSend = !!connected[coin]
   const balance = portfolio?.coins[coin]?.amount ?? '—'
   const valueFiat = portfolio?.coins[coin]?.value_fiat ?? null
-  const fiatMode = priceApiConfigured && (coinFiatMode[coin] ?? false)
-  const showFiat = fiatMode && valueFiat != null
   // While the daemon is still syncing, the balance isn't final.
   const syncing = portfolio?.coins[coin]?.synced === false
+
+  // Header echoes the History "Type" while on History; on-chain everywhere else. onchain/lightning
+  // flip coin<->fiat on click; "all" cycles on-chain -> Lightning -> fiat (fiat only with a price API).
+  const pc = portfolio?.coins[coin]
+  const lnSendSat = pc?.ln_can_send_sat ?? 0
+  const lnRecvSat = pc?.ln_can_receive_sat ?? 0
+  const unitPrice = valueFiat != null && Number(balance) > 0 ? Number(valueFiat) / Number(balance) : null
+  const cat: 'onchain' | 'lightning' = balanceView === 'lightning' ? 'lightning' : 'onchain'
+  const fiatNow = balanceView === 'fiat' && priceApiConfigured
+  const lnText = (sat: number) =>
+    fiatNow && unitPrice != null
+      ? formatFiat(unitPrice * (sat / 1e8), fiatCurrency)
+      : formatAmount((sat / 1e8).toFixed(8), coin, false)
 
   const onPay = (address: string) => {
     setPayPrefill(address)
@@ -72,7 +119,7 @@ export default function CoinDetail() {
           display: 'flex',
           alignItems: 'center',
           gap: 12,
-          padding: '16px 22px 6px',
+          padding: '16px 22px 4px',
           background: 'rgba(34,38,43,0.58)',
           backdropFilter: 'blur(20px) saturate(170%) contrast(108%)',
           WebkitBackdropFilter: 'blur(20px) saturate(170%) contrast(108%)',
@@ -124,15 +171,8 @@ export default function CoinDetail() {
         {/* Flips all coins between amount and fiat; fixed label+amount heights so the header doesn't jump on toggle. */}
         <button
           type="button"
-          disabled={!priceApiConfigured}
-          onClick={() => { if (priceApiConfigured) toggleAllFiatFrom(coin) }}
-          title={
-            !priceApiConfigured
-              ? 'Add a price API in Settings to enable fiat values'
-              : fiatMode
-                ? 'Showing fiat — click to show coin units (all coins)'
-                : 'Click to show fiat value (all coins)'
-          }
+          onClick={cycleBalanceView}
+          title="Click to cycle coin amount / Lightning / fiat"
           style={{
             flex: '0 0 auto',
             display: 'flex',
@@ -142,7 +182,7 @@ export default function CoinDetail() {
             background: 'transparent',
             border: 'none',
             padding: 0,
-            cursor: priceApiConfigured ? 'pointer' : 'default',
+            cursor: 'pointer',
             outline: 'none',
           }}
         >
@@ -155,29 +195,36 @@ export default function CoinDetail() {
               display: 'inline-flex',
               alignItems: 'center',
               gap: 6,
-              fontFamily: showFiat ? 'ui-monospace, SFMono-Regular, Menlo, monospace' : undefined,
-              textTransform: showFiat ? 'none' : 'uppercase',
-              letterSpacing: showFiat ? 0 : 1,
+              fontFamily: fiatNow ? 'ui-monospace, SFMono-Regular, Menlo, monospace' : undefined,
+              textTransform: fiatNow ? 'none' : 'uppercase',
+              letterSpacing: fiatNow ? 0 : 1,
             }}
           >
-            {showFiat ? formatAmount(balance, coin, true) : 'Balance'}
-            {priceApiConfigured && <span style={{ fontSize: 12, opacity: 0.65 }} aria-hidden>⇄</span>}
+            {cat === 'lightning' ? '⚡ Lightning' : fiatNow ? formatAmount(balance, coin, true) : 'Balance'}
+            <span style={{ fontSize: 12, opacity: 0.65 }} aria-hidden>⇄</span>
           </div>
           <div style={{ height: 30, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div
-              style={{
-                fontSize: 26,
-                lineHeight: '30px',
-                fontWeight: 700,
-                color: '#e6e6e6',
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                fontVariantNumeric: 'tabular-nums',
-                textShadow: '0 0 12px color-mix(in srgb, var(--coin), transparent 70%)',
-              }}
-            >
-              {showFiat ? `≈ ${formatFiat(valueFiat, fiatCurrency)}` : formatAmount(balance, coin, false)}
-            </div>
-            {priceApiConfigured && !showFiat && fiatMode && (
+            {cat === 'lightning' ? (
+              <div style={{ display: 'inline-flex', alignItems: 'baseline', gap: 14, fontSize: 17, lineHeight: '30px', fontWeight: 700, color: '#e6e6e6', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontVariantNumeric: 'tabular-nums' }}>
+                <span title="Can send"><span style={{ color: '#7fe0a3' }}>↑</span> {lnText(lnSendSat)}</span>
+                <span title="Can receive"><span style={{ color: '#e0a23a' }}>↓</span> {lnText(lnRecvSat)}</span>
+              </div>
+            ) : (
+              <div
+                style={{
+                  fontSize: 26,
+                  lineHeight: '30px',
+                  fontWeight: 700,
+                  color: '#e6e6e6',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  fontVariantNumeric: 'tabular-nums',
+                  textShadow: '0 0 12px color-mix(in srgb, var(--coin), transparent 70%)',
+                }}
+              >
+                {fiatNow ? `≈ ${formatFiat(valueFiat, fiatCurrency)}` : formatAmount(balance, coin, false)}
+              </div>
+            )}
+            {fiatNow && valueFiat == null && (
               <span
                 style={{
                   fontSize: 10,

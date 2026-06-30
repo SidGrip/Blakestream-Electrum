@@ -42,71 +42,74 @@ function fitNumber(numStr: string, suffix: string, maxLen: number) {
   return { text: `${intp}.${frac.slice(0, 2)}${sfx}`, full, trimmed: true }
 }
 
-// Per-coin row balance; click flips just this coin amount<->fiat without selecting it.
-// Trimmed amounts show the full value in a hover tooltip.
+// Per-coin row balance — follows the global balanceView (coin amount / fiat / Lightning).
+// Click cycles the view (same as the header toggle). Lightning shows send/receive stacked.
 function RailBalance({ ticker }: { ticker: string }) {
   const portfolio = useStore((s) => s.portfolio)
-  const rawFiatMode = useStore((s) => s.coinFiatMode[ticker] ?? false)
+  const balanceView = useStore((s) => s.balanceView)
   const priceApiConfigured = useStore((s) => s.priceApiConfigured)
   const fiatCurrency = useStore((s) => s.fiatCurrency)
-  const toggleCoinFiat = useStore((s) => s.toggleCoinFiat)
+  const cycleBalanceView = useStore((s) => s.cycleBalanceView)
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null)
 
   const c = portfolio?.coins?.[ticker]
   if (!c) return null
-  const fiatMode = priceApiConfigured && rawFiatMode
+  const fiat = balanceView === 'fiat' && priceApiConfigured
+  const click = (e: MouseEvent<HTMLSpanElement>) => { e.stopPropagation(); cycleBalanceView() }
+
+  // Lightning: send/receive stacked vertically with in/out arrows, decimals trimmed to fit.
+  if (balanceView === 'lightning') {
+    const send = fitNumber(formatAmount(((c.ln_can_send_sat ?? 0) / 1e8).toFixed(8), ticker, false), '', 11)
+    const recv = fitNumber(formatAmount(((c.ln_can_receive_sat ?? 0) / 1e8).toFixed(8), ticker, false), '', 11)
+    return (
+      <span
+        role="button"
+        title="Lightning can send / receive — click to cycle view"
+        onClick={click}
+        style={{
+          flex: '0 0 auto', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1,
+          fontFamily: MONO, fontSize: 11, fontVariantNumeric: 'tabular-nums', maxWidth: 120, cursor: 'pointer',
+        }}
+      >
+        <span title={`Can send ${send.full}`} style={{ color: '#cfd4da', whiteSpace: 'nowrap' }}>
+          <span style={{ color: '#7fe0a3' }}>↑</span> {send.text}
+        </span>
+        <span title={`Can receive ${recv.full}`} style={{ color: '#8a929b', whiteSpace: 'nowrap' }}>
+          <span style={{ color: '#e0a23a' }}>↓</span> {recv.text}
+        </span>
+      </span>
+    )
+  }
+
   const hasPending = Number(c.pending ?? 0) > 0
   const syncing = c.synced === false
-
   let display: string
   let full = ''
   let trimmed = false
-  if (fiatMode) {
+  if (fiat) {
     display = c.value_fiat != null ? formatFiat(c.value_fiat, fiatCurrency) : 'no price'
   } else {
-    // No ticker suffix here — the row already says which coin it is.
     const fit = fitNumber(formatAmount(c.amount, ticker, false), '', 13)
     display = fit.text
     full = fit.full
     trimmed = fit.trimmed
   }
-
   const onEnter = (e: MouseEvent<HTMLSpanElement>) => {
     if (!trimmed) return
     const r = e.currentTarget.getBoundingClientRect()
     setTip({ x: r.right + 8, y: r.top - 2, text: full })
   }
-
   return (
     <span
       role="button"
-      title={
-        !priceApiConfigured
-          ? 'Add a price API in Settings to enable fiat values'
-          : hasPending
-            ? 'Some funds pending (unconfirmed)'
-            : fiatMode
-              ? 'Click for coin amount'
-              : 'Click for fiat value'
-      }
-      onClick={(e) => {
-        e.stopPropagation()
-        if (priceApiConfigured) toggleCoinFiat(ticker)
-      }}
+      title={fiat ? 'Fiat value — click to cycle view' : 'Click to cycle view: coin / Lightning / fiat'}
+      onClick={click}
       onMouseEnter={onEnter}
       onMouseLeave={() => setTip(null)}
       style={{
-        flex: '0 0 auto',
-        marginLeft: 'auto',
-        maxWidth: 112,
-        fontFamily: MONO,
-        fontSize: 11,
-        fontVariantNumeric: 'tabular-nums',
-        color: fiatMode ? '#cfd4da' : '#8a929b',
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        cursor: priceApiConfigured ? 'pointer' : 'default',
+        flex: '0 0 auto', marginLeft: 'auto', maxWidth: 120, fontFamily: MONO, fontSize: 11, fontVariantNumeric: 'tabular-nums',
+        color: fiat ? '#cfd4da' : '#8a929b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        cursor: 'pointer',
       }}
     >
       {syncing
@@ -140,6 +143,9 @@ export default function CoinSidebar() {
   const selected = useStore((s) => s.selected)
   const setSelected = useStore((s) => s.setSelected)
   const overrides = useStore((s) => s.coinColorOverrides)
+  const coinStatus = useStore((s) => s.coinStatus)
+  const startCoin = useStore((s) => s.startCoin)
+  const balanceView = useStore((s) => s.balanceView)
 
   const entries: CoinMeta[] = coins ? Object.values(coins) : []
 
@@ -162,6 +168,9 @@ export default function CoinSidebar() {
           entries.map((c) => {
             const color = resolveCoinColor(overrides, c.ticker)
             const active = selected === c.ticker
+            const status = coinStatus[c.ticker] ?? 'running'
+            const running = status === 'running'
+            const dot = status === 'starting' ? color : status === 'failed' ? '#e0a23a' : '#6b7280'
             return (
               <button
                 key={c.ticker}
@@ -186,17 +195,20 @@ export default function CoinSidebar() {
                   textAlign: 'left',
                   color: '#e6e6e6',
                   font: 'inherit',
+                  opacity: running ? 1 : 0.62,
                 }}
               >
-                <CoinIcon ticker={c.ticker} size={26} />
+                <span style={{ display: 'inline-flex', filter: status === 'stopped' ? 'grayscale(1)' : undefined }}>
+                  <CoinIcon ticker={c.ticker} size={26} />
+                </span>
                 <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                  {/* ticker + balance on the top line; coin name spans full width below */}
                   <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{c.ticker}</span>
-                    <RailBalance ticker={c.ticker} />
+                    {running && balanceView !== 'lightning' && <RailBalance ticker={c.ticker} />}
                   </span>
                   <span
                     style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
                       fontSize: 11,
                       color: '#8a929b',
                       whiteSpace: 'nowrap',
@@ -204,9 +216,31 @@ export default function CoinSidebar() {
                       textOverflow: 'ellipsis',
                     }}
                   >
+                    {!running && (
+                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: dot, flex: '0 0 auto' }} />
+                    )}
                     {c.coin_name ?? c.ticker}
                   </span>
                 </span>
+                {running && balanceView === 'lightning' && <RailBalance ticker={c.ticker} />}
+                {/* Start affordance pinned to the right of the row so all the buttons line up vertically. */}
+                {!running && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Start ${c.ticker} wallet`}
+                    onClick={(e) => { e.stopPropagation(); if (status !== 'starting') void startCoin(c.ticker) }}
+                    style={{
+                      flex: '0 0 auto',
+                      fontSize: 11, fontWeight: 600, padding: '2px 10px', borderRadius: 6,
+                      cursor: status === 'starting' ? 'default' : 'pointer',
+                      border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.05)',
+                      color: '#cfd4da',
+                    }}
+                  >
+                    {status === 'starting' ? 'Starting…' : status === 'failed' ? 'Retry' : 'Start'}
+                  </span>
+                )}
               </button>
             )
           })

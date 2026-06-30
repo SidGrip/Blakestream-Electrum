@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from '../../store'
+import { useStore, type ToolsSection } from '../../store'
 import {
   loadTransaction, fetchTransaction, broadcastTransaction,
   signMessage, verifyMessage, getAddresses,
   encryptMessage, decryptMessage,
   sweepKey, bumpFee,
   getMasterPubkey, revealSeed, exportPrivkey,
+  exportWalletBackup, pickBackupSavePath,
 } from '../../api'
 import type { LoadedTx } from '../../types'
 import { card, lbl, input, primaryBtn, secondaryBtn, errBox, codeBox } from '../uiKit'
+import ErrorOverlay from '../ErrorOverlay'
 import { formatAmount, explorerTxUrl } from '../../explorer'
 
 // Satoshi int -> whole-coin amount string for formatAmount (which expects coin units).
@@ -17,13 +19,110 @@ function satsToAmount(sats: number): string {
 }
 
 // Tools sub-tabs; only the active tool mounts, so switching doesn't fire every tool's fetches.
-const TOOL_TABS = [
+const TOOL_TABS: { key: ToolsSection; label: string; subtitle: string }[] = [
+  { key: 'backup', label: 'Backup wallet', subtitle: 'full wallet · encrypted' },
   { key: 'load', label: 'Load transaction', subtitle: 'inspect · broadcast' },
   { key: 'sign', label: 'Sign / verify message', subtitle: 'prove address ownership' },
   { key: 'crypto', label: 'Encrypt / decrypt message', subtitle: 'ECIES' },
   { key: 'advanced', label: 'Advanced transactions', subtitle: 'sweep · bump fee' },
   { key: 'keys', label: 'Keys & seed', subtitle: 'sensitive · reveal · import' },
 ]
+
+function FullWalletBackup() {
+  const pushToast = useStore((s) => s.pushToast)
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState<{ path: string; bytes: number; files: number } | null>(null)
+
+  const run = async () => {
+    setErr('')
+    setDone(null)
+    if (!password) {
+      setErr('Enter your current wallet password.')
+      return
+    }
+    const path = await pickBackupSavePath()
+    if (!path) return
+    setBusy(true)
+    try {
+      const result = await exportWalletBackup(password, path)
+      setDone({ path: result.path, bytes: result.bytes, files: result.files })
+      pushToast('Wallet backup saved.', 'success')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'backup failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10, maxWidth: 1040 }}>
+        <div style={{ color: '#cfd4da', fontSize: 13, lineHeight: 1.5 }}>
+          Create one portable <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>.bswallet</span> backup file.
+          It includes the encrypted vault, contacts, settings, per-coin wallet files, and Lightning channel state stored in those wallet files.
+        </div>
+        <div style={{ color: '#fbbc04', fontSize: 12, lineHeight: 1.45 }}>
+          The backup is encrypted with your current wallet password. To restore this file later,
+          use the wallet password that was active when the backup was created.
+        </div>
+        <label style={lbl}>Current wallet password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="wallet password"
+          autoComplete="off"
+          style={{ ...input, maxWidth: 360 }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !busy) void run() }}
+        />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            style={{
+              ...primaryBtn, display: 'inline-flex', alignItems: 'center', gap: 8,
+              // Greyed + inert until a password is entered (and while saving). Cursor stays the
+              // normal arrow when disabled — no pointer, no not-allowed.
+              ...((busy || !password) ? { opacity: 0.45, boxShadow: 'none', cursor: 'default' } : {}),
+            }}
+            onClick={run}
+            disabled={busy || !password}
+          >
+            {busy ? 'Saving backup...' : 'Save backup...'}
+          </button>
+          <span style={{ color: '#8a929b', fontSize: 11 }}>
+            Close the wallet before copying the same backup to another active PC.
+          </span>
+        </div>
+        {busy && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 9,
+              color: '#cfd4da',
+              fontSize: 12,
+              marginTop: 2,
+            }}
+          >
+            <span className="mini-spinner" aria-hidden="true" />
+            Creating encrypted backup file. This can take a moment for wallet files and Lightning channel state.
+          </div>
+        )}
+      </div>
+      <ErrorOverlay message={err} onDismiss={() => setErr('')} />
+      {done && (
+        <div style={{ ...codeBox, marginTop: 12 }}>
+          Saved {done.files} files, {(done.bytes / (1024 * 1024)).toFixed(2)} MB<br />
+          {done.path}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // "Load transaction": paste/load/fetch a raw tx (hex/PSBT), inspect it, broadcast if fully signed.
 function LoadTransaction({ coin }: { coin: string }) {
@@ -117,7 +216,7 @@ function LoadTransaction({ coin }: { coin: string }) {
       </div>
       {!connected && <div style={{ color: '#8a929b', fontSize: 11, marginTop: 4 }}>Fetching needs a network connection — {coin} is offline.</div>}
 
-      {err && <div style={errBox}>{err}</div>}
+      <ErrorOverlay message={err} onDismiss={() => setErr('')} />
 
       {result && <TxView coin={coin} tx={result} connected={connected} busy={busy} onBroadcast={doBroadcast} />}
     </div>
@@ -204,7 +303,7 @@ function BroadcastableResult({ coin, tx }: { coin: string; tx: LoadedTx }) {
   return (
     <div>
       <TxView coin={coin} tx={tx} connected={connected} busy={busy} onBroadcast={broadcast} />
-      {err && <div style={errBox}>{err}</div>}
+      <ErrorOverlay message={err} onDismiss={() => setErr('')} />
       {done && <div style={{ marginTop: 8, color: '#4caf50', fontSize: 12 }}>Broadcast — txid {done}</div>}
     </div>
   )
@@ -293,7 +392,7 @@ function SignVerifyMessage({ coin }: { coin: string }) {
         <div style={{ marginTop: 8 }}>
           <button type="button" style={primaryBtn} onClick={doSign} disabled={signing || !addr.trim()}>Sign</button>
         </div>
-        {signErr && <div style={errBox}>{signErr}</div>}
+        <ErrorOverlay message={signErr} onDismiss={() => setSignErr('')} />
         {sig && (
           <div style={{ marginTop: 10 }}>
             <label style={lbl}>Signature</label>
@@ -328,7 +427,7 @@ function SignVerifyMessage({ coin }: { coin: string }) {
           {vResult === true && <span style={{ color: '#4caf50', fontWeight: 700, fontSize: 13 }}>✓ Valid signature</span>}
           {vResult === false && <span style={{ color: '#ef5350', fontWeight: 700, fontSize: 13 }}>✗ Invalid signature</span>}
         </div>
-        {vErr && <div style={errBox}>{vErr}</div>}
+        <ErrorOverlay message={vErr} onDismiss={() => setVErr('')} />
       </div>
     </div>
   )
@@ -404,7 +503,7 @@ function EncryptDecryptMessage({ coin }: { coin: string }) {
         <div style={{ marginTop: 8 }}>
           <button type="button" style={primaryBtn} onClick={doEncrypt} disabled={eBusy || !eKey.trim()}>Encrypt</button>
         </div>
-        {eErr && <div style={errBox}>{eErr}</div>}
+        <ErrorOverlay message={eErr} onDismiss={() => setEErr('')} />
         {eOut && (
           <div style={{ marginTop: 10 }}>
             <label style={lbl}>Encrypted</label>
@@ -426,7 +525,7 @@ function EncryptDecryptMessage({ coin }: { coin: string }) {
         <div style={{ marginTop: 8 }}>
           <button type="button" style={primaryBtn} onClick={doDecrypt} disabled={dBusy || !dKey.trim() || !dCipher.trim()}>Decrypt</button>
         </div>
-        {dErr && <div style={errBox}>{dErr}</div>}
+        <ErrorOverlay message={dErr} onDismiss={() => setDErr('')} />
         {dOut && (
           <div style={{ marginTop: 10 }}>
             <label style={lbl}>Decrypted</label>
@@ -525,7 +624,7 @@ function AdvancedTx({ coin }: { coin: string }) {
         </div>
       )}
 
-      {err && <div style={errBox}>{err}</div>}
+      <ErrorOverlay message={err} onDismiss={() => setErr('')} />
       {built && <div style={{ marginTop: 14 }}><BroadcastableResult coin={coin} tx={built} /></div>}
     </div>
   )
@@ -604,8 +703,8 @@ function RevealGate({
       style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(2px)' }}
     >
       <div onClick={(e) => e.stopPropagation()} style={{ ...card, width: 'min(560px, 92vw)', maxHeight: '86vh', overflow: 'auto' }}>
-        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{title}</div>
-        <div style={{ background: 'rgba(239,83,80,0.10)', border: '1px solid rgba(239,83,80,0.4)', borderRadius: 8, padding: '10px 12px', color: '#ffb4b1', fontSize: 12.5, lineHeight: 1.5 }}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8, overflowWrap: 'anywhere' }}>{title}</div>
+        <div style={{ background: 'rgba(239,83,80,0.10)', border: '1px solid rgba(239,83,80,0.4)', borderRadius: 8, padding: '10px 12px', color: '#ffb4b1', fontSize: 15.5, lineHeight: 1.5, textAlign: 'center' }}>
           ⚠ {warning}
         </div>
 
@@ -673,7 +772,7 @@ function KeysAndSeed({ coin }: { coin: string }) {
         <div style={{ fontWeight: 700, fontSize: 13 }}>Master public key (xpub)</div>
         <div style={{ color: '#8a929b', fontSize: 11, margin: '2px 0 6px' }}>Public — safe to share for watch-only imports.</div>
         <button type="button" style={secondaryBtn} onClick={showMpk} disabled={mpkBusy}>{mpkBusy ? 'Loading…' : 'Show master public key'}</button>
-        {mpkErr && <div style={errBox}>{mpkErr}</div>}
+        <ErrorOverlay message={mpkErr} onDismiss={() => setMpkErr('')} />
         {mpk && <div style={{ ...codeBox, marginTop: 8 }}>{mpk}</div>}
       </div>
 
@@ -715,8 +814,8 @@ function KeysAndSeed({ coin }: { coin: string }) {
       )}
       {gate === 'privkey' && (
         <RevealGate
-          title={`Reveal private key for ${pkAddr.slice(0, 14)}…`}
-          warning="This shows the private key for this address. Anyone who sees it can spend the coins on this address. Make sure no one is watching your screen."
+          title={`Reveal private key for ${pkAddr}`}
+          warning="This shows the private key for this address."
           secretLabel="Private key"
           onReveal={async (pw) => (await exportPrivkey(coin, pw, pkAddr.trim())).privkey}
           onClose={() => setGate(null)}
@@ -728,7 +827,8 @@ function KeysAndSeed({ coin }: { coin: string }) {
 
 // Per-coin Tools tab: Electrum's "Tools" menu features, one section per group.
 export default function ToolsTab({ coin }: { coin: string }) {
-  const [active, setActive] = useState('load')
+  const active = useStore((s) => s.toolsSection)
+  const setActive = useStore((s) => s.setToolsSection)
   const tab = TOOL_TABS.find((t) => t.key === active) ?? TOOL_TABS[0]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -756,7 +856,7 @@ export default function ToolsTab({ coin }: { coin: string }) {
       </div>
 
       {/* Active tool — header over content; only this tool is mounted. */}
-      <section style={{ ...card }}>
+      <section style={{ ...card, position: 'relative' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 14 }}>
           <span style={{ fontWeight: 700, fontSize: 14 }}>{tab.label}</span>
           <span style={{ color: '#8a929b', fontSize: 12, marginLeft: 'auto' }}>{tab.subtitle}</span>
@@ -766,6 +866,7 @@ export default function ToolsTab({ coin }: { coin: string }) {
         {active === 'crypto' && <EncryptDecryptMessage coin={coin} />}
         {active === 'advanced' && <AdvancedTx coin={coin} />}
         {active === 'keys' && <KeysAndSeed coin={coin} />}
+        {active === 'backup' && <FullWalletBackup />}
       </section>
     </div>
   )
