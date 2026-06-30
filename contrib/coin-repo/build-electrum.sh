@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build THIS coin's Electrium 0.25.2 wallet for an explicitly chosen target, by
+# Build THIS coin's Electrum 0.25.2 wallet for an explicitly chosen target, by
 # delegating to the shared multicoin builder (BlueDragon747/Blakestream-Electrum).
 #
 # The OS is NOT auto-detected: Linux and Windows are both built in containers, so
@@ -20,7 +20,7 @@ usage() {
     cat <<EOF
 usage: ./build-electrum.sh <linux|windows|macos|wheel|all>
 
-Build the ${COIN_NAME} (${COIN_CODE}) Electrium wallet. Choose the target with a
+Build the ${COIN_NAME} (${COIN_CODE}) Electrum wallet. Choose the target with a
 flag (the OS is NOT auto-detected — linux/windows build in an amd64 container, so
 any amd64 Docker host — Linux, Windows, or an Intel Mac — can build either):
 
@@ -32,10 +32,12 @@ any amd64 Docker host — Linux, Windows, or an Intel Mac — can build either):
                      (amd64 Docker host -> linux + windows;  macOS -> + macos)
 
 Environment:
-  ELECTRIUM_SOURCE         Existing BlueDragon747/Blakestream-Electrum checkout to use.
-  ELECTRIUM_REPO_URL       Git URL cloned if no local checkout is found.
-  ELECTRIUM_WORKSPACE_ROOT Generated variant workspaces.
-  ELECTRIUM_ARTIFACT_ROOT  Output artifact root.
+  ELECTRUM_SOURCE          Existing BlueDragon747/Blakestream-Electrum checkout to use.
+  ELECTRUM_REPO_URL        Git URL cloned if no local checkout is found.
+  ELECTRUM_WORKSPACE_ROOT  Generated variant workspaces.
+  ELECTRUM_ARTIFACT_ROOT   Output artifact root.
+
+  ELECTRIUM_* aliases are also accepted for older local scripts.
 EOF
 }
 
@@ -58,31 +60,46 @@ is_mac()        { [ "$(uname -s)" = "Darwin" ]; }
 amd64_native()  { case "$(uname -m)" in x86_64|amd64) return 0 ;; *) return 1 ;; esac; }
 container_host() { have_docker && amd64_native; }
 
-find_electrium_source() {
-    if [ -n "${ELECTRIUM_SOURCE:-}" ]; then printf '%s\n' "$ELECTRIUM_SOURCE"; return; fi
+find_electrum_source() {
+    local configured_source="${ELECTRUM_SOURCE:-${ELECTRIUM_SOURCE:-}}"
+    if [ -n "$configured_source" ]; then printf '%s\n' "$configured_source"; return; fi
     local candidate
     for candidate in \
         "$REPO_ROOT"/../Blakestream-Electrum \
+        "$REPO_ROOT"/../Blakestream-Electrum-0.25.2 \
         "$REPO_ROOT"/../Blakestream-Electrium \
         "$REPO_ROOT"/../Blakestream-Electrium-0.25.2 ; do
         if [ -x "$candidate/scripts/build_wallet_variant.sh" ]; then printf '%s\n' "$candidate"; return; fi
     done
     local cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/blakestream"
-    local source_root="$cache_root/Blakestream-Electrium"
-    local repo_url="${ELECTRIUM_REPO_URL:-https://github.com/BlueDragon747/Blakestream-Electrum.git}"
+    local source_root="$cache_root/Blakestream-Electrum"
+    local repo_url="${ELECTRUM_REPO_URL:-${ELECTRIUM_REPO_URL:-https://github.com/BlueDragon747/Blakestream-Electrum.git}}"
     if [ ! -x "$source_root/scripts/build_wallet_variant.sh" ]; then
         mkdir -p "$cache_root"
-        git clone --depth 1 "$repo_url" "$source_root"
+        if [ -d "$source_root/.git" ]; then
+            ( cd "$source_root" \
+                && git remote set-url origin "$repo_url" \
+                && git fetch --depth 1 origin HEAD \
+                && git reset --hard FETCH_HEAD )
+        else
+            rm -rf "$source_root"
+            git clone --depth 1 "$repo_url" "$source_root"
+        fi
     fi
+    [ -x "$source_root/scripts/build_wallet_variant.sh" ] || {
+        echo "ERROR: $repo_url did not provide scripts/build_wallet_variant.sh" >&2
+        echo "Set ELECTRUM_SOURCE to an existing builder checkout or ELECTRUM_REPO_URL to the correct builder repo." >&2
+        return 1
+    }
     printf '%s\n' "$source_root"
 }
 
-ELECTRIUM_ROOT="$(find_electrium_source)"
-[ -x "$ELECTRIUM_ROOT/scripts/build_wallet_variant.sh" ] || {
-    echo "ERROR: missing Electrium builder at $ELECTRIUM_ROOT/scripts/build_wallet_variant.sh" >&2; exit 1; }
+ELECTRUM_ROOT="$(find_electrum_source)"
+[ -x "$ELECTRUM_ROOT/scripts/build_wallet_variant.sh" ] || {
+    echo "ERROR: missing Electrum builder at $ELECTRUM_ROOT/scripts/build_wallet_variant.sh" >&2; exit 1; }
 
-WORKSPACE_ROOT="${ELECTRIUM_WORKSPACE_ROOT:-$REPO_ROOT/outputs/Electrium/workspaces}"
-ARTIFACT_ROOT="${ELECTRIUM_ARTIFACT_ROOT:-$REPO_ROOT/outputs/Electrium}"
+WORKSPACE_ROOT="${ELECTRUM_WORKSPACE_ROOT:-${ELECTRIUM_WORKSPACE_ROOT:-$REPO_ROOT/outputs/Electrum/workspaces}}"
+ARTIFACT_ROOT="${ELECTRUM_ARTIFACT_ROOT:-${ELECTRIUM_ARTIFACT_ROOT:-$REPO_ROOT/outputs/Electrum}}"
 
 # Build one target after checking this host can do it.
 run_one() {
@@ -94,7 +111,7 @@ run_one() {
             have_docker || { echo "$t needs Docker on this host." >&2; return 2; }
             amd64_native || echo "  warning: $t builds an amd64 container; on this $(uname -m) host it runs under slow/flaky emulation." >&2 ;;
     esac
-    "$ELECTRIUM_ROOT/scripts/build_wallet_variant.sh" "$COIN_CODE" "$t" "$WORKSPACE_ROOT" "$ARTIFACT_ROOT"
+    "$ELECTRUM_ROOT/scripts/build_wallet_variant.sh" "$COIN_CODE" "$t" "$WORKSPACE_ROOT" "$ARTIFACT_ROOT"
 }
 
 if [ "$TARGET" = "all" ]; then
@@ -110,4 +127,4 @@ if [ -d "$ARTIFACT_ROOT/$COIN_CODE" ]; then
     ( cd "$ARTIFACT_ROOT/$COIN_CODE" \
         && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS )
 fi
-echo "Electrium ${COIN_CODE} artifacts: $ARTIFACT_ROOT/$COIN_CODE"
+echo "Electrum ${COIN_CODE} artifacts: $ARTIFACT_ROOT/$COIN_CODE"
