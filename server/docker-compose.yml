@@ -3,7 +3,7 @@
 #
 # This is a DEPLOY TEMPLATE. Before `docker compose up`:
 #   - set each DAEMON_URL to that coin's full-node RPC (user:pass@host:port)
-#   - put a CA-signed cert at ./certs/{fullchain.pem,privkey.pem} (Let's Encrypt)
+#   - put a CA-signed cert at ./ssl/{fullchain.pem,privkey.pem} (Let's Encrypt)
 #   - confirm the per-coin ports match the wallet's servers.json (BLC is 50002/50001)
 # Actual production deploy to electrum1/electrum2 is a separate task.
 #
@@ -18,10 +18,11 @@ x-electrumx: &electrumx
     DB_ENGINE: leveldb
     ALLOW_ROOT: "true"
     PEER_DISCOVERY: self
-    SSL_CERTFILE: /certs/fullchain.pem
-    SSL_KEYFILE: /certs/privkey.pem
+    ELECTRUMX_DEFAULT_FEE_BTC_KVB: "${ELECTRUMX_DEFAULT_FEE_BTC_KVB:-0.00002}"
+    SSL_CERTFILE: /ssl/fullchain.pem
+    SSL_KEYFILE: /ssl/privkey.pem
   volumes:
-    - ./certs:/certs:ro
+    - ./ssl:/ssl:ro
 
 services:
   blc:
@@ -33,7 +34,7 @@ services:
       DAEMON_URL: "http://USER:PASS@blc-node:8332/"
       SERVICES: "ssl://0.0.0.0:50002,tcp://0.0.0.0:50001,rpc://0.0.0.0:8001"
       REPORT_SERVICES: "ssl://electrum1.blakestream.io:50002,tcp://electrum1.blakestream.io:50001"
-    volumes: ["./db/blc:/db", "./certs:/certs:ro"]
+    volumes: ["./db/blc:/db", "./ssl:/ssl:ro"]
     ports: ["50001:50001", "50002:50002"]
 
   bbtc:
@@ -45,7 +46,7 @@ services:
       DAEMON_URL: "http://USER:PASS@bbtc-node:8342/"
       SERVICES: "ssl://0.0.0.0:50012,tcp://0.0.0.0:50011,rpc://0.0.0.0:8002"
       REPORT_SERVICES: "ssl://electrum1.blakestream.io:50012,tcp://electrum1.blakestream.io:50011"
-    volumes: ["./db/bbtc:/db", "./certs:/certs:ro"]
+    volumes: ["./db/bbtc:/db", "./ssl:/ssl:ro"]
     ports: ["50011:50011", "50012:50012"]
 
   elt:
@@ -57,7 +58,7 @@ services:
       DAEMON_URL: "http://USER:PASS@elt-node:8352/"
       SERVICES: "ssl://0.0.0.0:50022,tcp://0.0.0.0:50021,rpc://0.0.0.0:8003"
       REPORT_SERVICES: "ssl://electrum1.blakestream.io:50022,tcp://electrum1.blakestream.io:50021"
-    volumes: ["./db/elt:/db", "./certs:/certs:ro"]
+    volumes: ["./db/elt:/db", "./ssl:/ssl:ro"]
     ports: ["50021:50021", "50022:50022"]
 
   lit:
@@ -69,7 +70,7 @@ services:
       DAEMON_URL: "http://USER:PASS@lit-node:8362/"
       SERVICES: "ssl://0.0.0.0:50032,tcp://0.0.0.0:50031,rpc://0.0.0.0:8004"
       REPORT_SERVICES: "ssl://electrum1.blakestream.io:50032,tcp://electrum1.blakestream.io:50031"
-    volumes: ["./db/lit:/db", "./certs:/certs:ro"]
+    volumes: ["./db/lit:/db", "./ssl:/ssl:ro"]
     ports: ["50031:50031", "50032:50032"]
 
   pho:
@@ -81,7 +82,7 @@ services:
       DAEMON_URL: "http://USER:PASS@pho-node:8372/"
       SERVICES: "ssl://0.0.0.0:50042,tcp://0.0.0.0:50041,rpc://0.0.0.0:8005"
       REPORT_SERVICES: "ssl://electrum1.blakestream.io:50042,tcp://electrum1.blakestream.io:50041"
-    volumes: ["./db/pho:/db", "./certs:/certs:ro"]
+    volumes: ["./db/pho:/db", "./ssl:/ssl:ro"]
     ports: ["50041:50041", "50042:50042"]
 
   umo:
@@ -93,5 +94,5 @@ services:
       DAEMON_URL: "http://USER:PASS@umo-node:8382/"
       SERVICES: "ssl://0.0.0.0:50052,tcp://0.0.0.0:50051,rpc://0.0.0.0:8006"
       REPORT_SERVICES: "ssl://electrum1.blakestream.io:50052,tcp://electrum1.blakestream.io:50051"
-    volumes: ["./db/umo:/db", "./certs:/certs:ro"]
+    volumes: ["./db/umo:/db", "./ssl:/ssl:ro"]
     ports: ["50051:50051", "50052:50052"]

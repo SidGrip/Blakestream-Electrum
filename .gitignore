@@ -31,6 +31,10 @@ contrib/trigger_binaries
 # build workspaces
 .build-multi/
 
+# ElectrumX generated deploy files contain local RPC endpoints and secrets.
+server/deploy/
+electrumx-blakestream/
+
 # multiwallet (unified/) — track source, not build artifacts
 node_modules/
 __pycache__/

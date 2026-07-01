@@ -1,4 +1,16 @@
 {
+    "electrum1.blakecoin.org": {
+        "pruning": "-",
+        "s": "50002",
+        "t": "50001",
+        "version": "1.4.2"
+    },
+    "electrum2.blakecoin.org": {
+        "pruning": "-",
+        "s": "50002",
+        "t": "50001",
+        "version": "1.4.2"
+    },
     "electrum1.blakestream.io": {
         "pruning": "-",
         "s": "50002",

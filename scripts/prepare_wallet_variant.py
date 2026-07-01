@@ -173,11 +173,13 @@ def clear_network_files(workspace: Path, coin: dict, repo_root: Path, coin_code:
     for net_name in ("mainnet", "testnet", "testnet4", "regtest", "signet", "mutinynet"):
         net_dir = chains / net_name
         if net_name == "mainnet":
-            # Ship the two Blakestream ElectrumX servers, on THIS coin's ports, as the
+            # Ship the Blakestream ElectrumX servers, on THIS coin's ports, as the
             # default server list so the wallet connects out of the box.
             entry = {"pruning": "-", "s": coin["electrum_port_ssl"],
                      "t": coin["electrum_port_tcp"], "version": "1.4"}
             write_json(net_dir / "servers.json", {
+                "electrum1.blakecoin.org": entry,
+                "electrum2.blakecoin.org": entry,
                 "electrum1.blakestream.io": entry,
                 "electrum2.blakestream.io": entry,
             })

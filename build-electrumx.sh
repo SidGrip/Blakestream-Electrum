@@ -20,11 +20,14 @@ for a in "$@"; do
     esac
 done
 
-# Minimal build context (server/ + blake256/ only) so the multi-GB outputs/ tree
-# is never sent to the docker daemon.
+# Minimal build context (server/ + blake256/ only) so multi-GB build/runtime
+# outputs are never sent to the docker daemon.
 CTX="$(mktemp -d)"; trap 'rm -rf "$CTX"' EXIT
 rsync -a --exclude '__pycache__/' --exclude '*.pyc' --exclude 'build/' \
-      --exclude 'dist/' --exclude '*.egg-info/' "$REPO_ROOT/server/"   "$CTX/server/"
+      --exclude 'dist/' --exclude '*.egg-info/' \
+      --exclude 'deploy/' --exclude 'db/' --exclude 'ssl/' \
+      --exclude '*.log' --exclude '*.pid' \
+      "$REPO_ROOT/server/"   "$CTX/server/"
 rsync -a --exclude '__pycache__/' --exclude '*.pyc' --exclude 'build/' "$REPO_ROOT/blake256/" "$CTX/blake256/"
 cp "$REPO_ROOT/server/Dockerfile.blakestream" "$CTX/Dockerfile"
 
