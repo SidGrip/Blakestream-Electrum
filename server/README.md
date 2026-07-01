@@ -107,6 +107,61 @@ After the daemon step completes, deploy ElectrumX:
 ./deploy.sh --fresh --build-local
 ```
 
+### Optional: SPV / compact block filters (BIP 157/158)
+
+To let SPV (Neutrino-family) wallets sync privately against these daemons,
+pass `--enable-blockfilters` on a fresh deploy:
+
+```bash
+./deploy-daemons.sh --fresh --enable-blockfilters
+```
+
+This appends `blockfilterindex=1` and `peerblockfilters=1` to each generated
+`.conf`. On first daemon start the compact filter index is built
+synchronously — the RPC for that coin is unavailable until the index
+catches up (roughly minutes to hours per coin depending on chain size;
+worst case for ELT is a few hours). Chain data, txindex, and coinstatsindex
+are untouched.
+
+The disk cost is small: roughly 500 MB – 1 GB per coin, so a 6-coin host
+gains ~3–6 GB in `~/.<coin>/indexes/blockfilter/`.
+
+### Rolling out on already-deployed hosts
+
+`deploy-daemons.sh --update` rewrites the `.conf` from a template, which
+would erase per-host tweaks made after the initial deploy (docker-bridge
+`rpcallowip` ranges, `coinstatsindex=1`, etc.). To enable block filters on
+an existing fleet without losing those tweaks, use `enable-blockfilters.sh`
+instead. It's an idempotent per-coin state machine that:
+
+1. Discovers the coin's running container on the target host.
+2. Backs up the existing `.conf`.
+3. Appends the two settings (skips if already present).
+4. `docker stop -t 600 <container>` (clean shutdown).
+5. `docker start <container>`.
+6. Polls `<coin>-cli getindexinfo` until `basic block filter index.synced=true`.
+7. Moves to the next coin on the same host.
+
+It runs per-host workers in parallel and per-coin sequential within each
+host, ordered smallest → largest (BLC → LIT → PHO → BBTC → UMO → ELT).
+Only one coin per host is offline at any moment, so the peer ElectrumX
+host keeps serving that coin to wallet clients while the affected host
+rebuilds.
+
+```bash
+./enable-blockfilters.sh \
+  --hosts root@host-a.example.com,root@host-b.example.com,root@host-c.example.com \
+  --dry-run
+
+./enable-blockfilters.sh \
+  --hosts root@host-a.example.com,root@host-b.example.com,root@host-c.example.com
+```
+
+Per-host progress lands in `server/logs/enable-blockfilters-<host>-<ts>.log`.
+Rollback for a single coin: restore the `<coin>.conf.bak-<ts>` sibling and
+`docker restart` the container. Fleet-wide rollback: pass `--disable` to
+strip the two lines and restart.
+
 ## Build The ElectrumX Image
 
 From the repository root:

@@ -164,6 +164,8 @@ build_macos() {
         echo "macos target must be built ON macOS (got $(uname -s))" >&2
         exit 2
     }
+    # Standalone wallet DMG builds need the native macOS toolchain but not Node.
+    ELECTRUM_MACOS_BOOTSTRAP_NODE=0 . "$REPO_ROOT/scripts/bootstrap-macos-build-env.sh"
     local ws="$WORKSPACE_ROOT/$COIN/macos"
     local osx_cache_shared="$WORKSPACE_ROOT/_osx-cache-shared"
     prepare_workspace "$ws"
@@ -188,6 +190,37 @@ guard = ('_PREPY=$(python3 -c \'import sys;print(".".join(map(str,sys.version_in
 t = t.replace(a, guard + a, 1).replace(b, b + '; fi', 1)
 open(p, "w").write(t)
 print("  patched make_osx.sh: python install now conditional")
+PY
+    # The bootstrap above prepares missing Homebrew packages once and adds their
+    # opt paths to PATH. Avoid repeated global Brew installs inside every fresh
+    # per-coin workspace unless bootstrap was explicitly bypassed.
+    python3 - "$ws/contrib/osx/make_osx.sh" <<'PY'
+import sys
+p = sys.argv[1]
+t = open(p).read()
+a = 'brew install autoconf automake libtool gettext coreutils pkgconfig'
+b = '''if [ "${ELECTRUM_MACOS_SKIP_OSX_BREW_INSTALL:-0}" = "1" ]; then
+    info "Using bootstrapped macOS build tools from PATH; skipping brew install"
+else
+    brew install autoconf automake libtool gettext coreutils pkgconfig
+fi'''
+assert a in t, "make_osx.sh brew dependency block not found (version drift?)"
+t = t.replace(a, b, 1)
+c = '''if ! which msgfmt > /dev/null 2>&1; then
+        brew install gettext
+        brew link --force gettext
+    fi'''
+d = '''if ! which msgfmt > /dev/null 2>&1; then
+        if [ "${ELECTRUM_MACOS_SKIP_OSX_BREW_INSTALL:-0}" = "1" ]; then
+            fail "msgfmt not found after macOS build bootstrap"
+        fi
+        brew install gettext
+        brew link --force gettext
+    fi'''
+assert c in t, "make_osx.sh gettext block not found (version drift?)"
+t = t.replace(c, d, 1)
+open(p, "w").write(t)
+print("  patched make_osx.sh: brew installs now delegated to macOS bootstrap")
 PY
     ( cd "$ws" && ./contrib/osx/make_osx.sh )
     # Persist the build cache for the next coin's build.

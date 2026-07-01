@@ -43,6 +43,15 @@ Linux and Windows build in an amd64 Docker container; the macOS app builds nativ
 `--jobs` only parallelises standalone Linux/Windows builds (multiwallet, macOS, and wheel stay serial
 because they share packaging state).
 
+On macOS the builder bootstraps portable build tooling into the clone instead of
+requiring a global Node install. The local cache lives under `.build-tools/macos`
+and is used for Node 22, npm cache, Electron downloads, and electron-builder
+downloads. Native macOS packaging still needs Apple's command line tools and
+Homebrew. Missing Homebrew packages such as `autoconf`, `automake`, `libtool`,
+`gettext`, `coreutils`, and `pkgconf` are installed only when needed. Set
+`ELECTRUM_MACOS_ALLOW_BREW_INSTALL=0` to make the build fail instead of changing
+the Homebrew prefix.
+
 ```bash
 ./build-electrum.sh -blc                               # Blakecoin, for this machine's OS
 ./build-electrum.sh -blc -pho --linux                  # BLC + PHO, Linux AppImage
