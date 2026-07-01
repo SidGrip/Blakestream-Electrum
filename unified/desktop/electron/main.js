@@ -155,6 +155,12 @@ ipcMain.handle('electrum:backup-open-dialog', async () => {
 })
 
 ipcMain.handle('electrum:relaunch', () => {
+  // Stop the backend + its daemon tree BEFORE relaunching. app.exit(0) skips the
+  // will-quit graceful path, so without this the six per-coin daemons orphan (on
+  // Windows a supervisor kill does not take its children), squat their fixed RPC
+  // ports, and wedge the post-relaunch open at "Opening your wallet".
+  quitting = true
+  killBackend()
   app.relaunch()
   app.exit(0)
   return true
@@ -224,10 +230,17 @@ function startBackend() {
 
 // Hard-stop fallback (used if the graceful path is unavailable or times out).
 function killBackend() {
-  if (backend) {
+  if (!backend) return
+  const pid = backend.pid
+  if (process.platform === 'win32' && pid) {
+    // A bare SIGTERM/kill on Windows terminates ONLY the supervisor and orphans its six
+    // daemon children (they are plain Popen children, not a job object) — which then squat
+    // their fixed RPC ports and wedge the next open. Kill the whole process tree.
+    try { require('child_process').execFileSync('taskkill', ['/pid', String(pid), '/T', '/F']) } catch (e) { /* already gone */ }
+  } else {
     try { backend.kill('SIGTERM') } catch (e) { /* already gone */ }
-    backend = null
   }
+  backend = null
 }
 
 function createWindow() {
