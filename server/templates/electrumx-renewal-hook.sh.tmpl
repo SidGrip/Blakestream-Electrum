@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Let's Encrypt deploy hook for the Blakestream ElectrumX server tier.
+#
+# certbot runs hooks in /etc/letsencrypt/renewal-hooks/deploy/ after every
+# successful renewal, with $RENEWED_LINEAGE set to the directory that holds the
+# new fullchain.pem and privkey.pem. We copy those into the compose ssl/ mount,
+# fix ownership for the container user, then restart the six ElectrumX
+# services so they re-read the cert.
+#
+# Why uid ${ELECTRUMX_UID} ownership matters:
+#   The stock 25.2 ElectrumX image currently runs as root, so root ownership is
+#   fine. If you deploy a non-root image, set ELECTRUMX_UID/ELECTRUMX_GID to
+#   that container user so privkey.pem is readable inside the container.
+#
+# This file is rendered from templates/electrumx-renewal-hook.sh.tmpl by
+# server/deploy.sh via envsubst — REPORT_HOST / DEPLOY_DIR / ELECTRUMX_UID /
+# ELECTRUMX_GID are substituted at install time.
+
+set -Eeuo pipefail
+
+# Only act on the lineage we care about. certbot fires this hook for every
+# renewed cert; we early-exit on lineages that don't match REPORT_HOST so other
+# certs on the same host keep working.
+TARGET_LINEAGE="${REPORT_HOST}"
+if [[ "${RENEWED_LINEAGE:-}" != *"/${TARGET_LINEAGE}"* ]]; then
+  exit 0
+fi
+
+DEPLOY_DIR="${DEPLOY_DIR}"
+SSL_DST="${DEPLOY_DIR}/ssl"
+
+mkdir -p "${SSL_DST}"
+
+# Copy + verify atomically via `install`: writes to a temp file and renames,
+# so ElectrumX never reads a half-written cert mid-renewal.
+install -m 0644 "${RENEWED_LINEAGE}/fullchain.pem" "${SSL_DST}/fullchain.pem"
+install -m 0640 "${RENEWED_LINEAGE}/privkey.pem"   "${SSL_DST}/privkey.pem"
+
+chown "${ELECTRUMX_UID}:${ELECTRUMX_GID}" \
+  "${SSL_DST}/fullchain.pem" "${SSL_DST}/privkey.pem"
+
+# Restart only the ElectrumX services. Other compose services in the same
+# project (if any) stay untouched. ElectrumX needs a clean shutdown — the
+# image's stop_grace_period (10m) covers that without us having to pass -t.
+cd "${DEPLOY_DIR}"
+docker compose restart \
+  blc bbtc elt lit pho umo
+
+logger -t electrumx-renewal-hook \
+  "renewed cert for ${TARGET_LINEAGE} deployed to ${SSL_DST}; six services restarted"

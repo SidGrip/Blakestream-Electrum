@@ -1,0 +1,16 @@
+altgraph==0.17.5 \
+    --hash=sha256:c87b395dd12fabde9c99573a9749d67da8d29ef9de0125c7f536699b4a9bc9e7
+Cython==3.2.6 \
+    --hash=sha256:6509472a245ccdf5fd11637a4744a1edfd38debb1a48332a8f3fe4b07db725bd
+macholib==1.16.4 \
+    --hash=sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362
+packaging==26.2 \
+    --hash=sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661
+pip==26.1.2 \
+    --hash=sha256:f49cd134c61cf2fd75e0ce2676db03e4054504a5a4986d00f8299ae632dc4605
+pyinstaller-hooks-contrib==2026.6 \
+    --hash=sha256:bef5002c32f4f50bd55b005da12cff64eca8783e7eaf86a06a62410164bab725
+setuptools==82.0.1 \
+    --hash=sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9
+wheel==0.47.0 \
+    --hash=sha256:cc72bd1009ba0cf63922e28f94d9d83b920aa2bb28f798a31d0691b02fa3c9b3

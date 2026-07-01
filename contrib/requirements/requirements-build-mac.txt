@@ -1,0 +1,17 @@
+pip
+setuptools
+wheel
+
+# needed by pyinstaller:
+# fixme: ugly to have to duplicate this here from upstream
+macholib>=1.8
+altgraph
+pyinstaller-hooks-contrib>=2025.2
+packaging>=22.0
+
+# Note: hidapi requires Cython at build-time (not needed at runtime).
+# For reproducible builds, the version of Cython must be pinned down.
+# The pinned Cython must be installed before hidapi is built;
+# otherwise when installing hidapi, pip just downloads the latest Cython.
+# see https://github.com/spesmilo/electrum/issues/5859
+Cython>=0.27

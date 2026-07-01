@@ -1,0 +1,8 @@
+# PyQt 6.10+ currently resolves to wheels that are not compatible with the
+# AppImage Python/platform target. Keep Linux AppImage on the latest compatible
+# 6.9.x line until the build image/toolchain is upgraded.
+PyQt6<6.10
+
+# we need at least cryptography>=2.1 for electrum.crypto,
+# and at least cryptography>=2.6 for dnspython[DNSSEC]
+cryptography>=2.6

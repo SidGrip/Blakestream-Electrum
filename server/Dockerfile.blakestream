@@ -1,0 +1,33 @@
+# Blakestream ElectrumX server image — one image serving all six BlakeStream
+# coins (Blakecoin / BlakeBitcoin / Electron-ELT / Lithium / Photon /
+# UniversalMolecule), selected per-instance via the COIN + NET env vars.
+#
+# Build from the repo root via build-electrumx.sh (which assembles a minimal
+# context of server/ + blake256/ so the 6GB outputs/ tree is NOT shipped).
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libleveldb-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/electrumx
+# blake256 provides the vendored _blake256 (8-round) C extension that
+# electrumx/lib/coins.py imports for BlakeStream header hashing.
+COPY blake256/ /opt/electrumx/blake256/
+COPY server/   /opt/electrumx/server/
+RUN pip install --no-cache-dir ./blake256 \
+    && pip install --no-cache-dir ./server
+
+# ElectrumX runtime defaults (override per coin instance at `docker run` time).
+ENV NET=mainnet \
+    DB_DIRECTORY=/db \
+    DB_ENGINE=leveldb \
+    ALLOW_ROOT=true \
+    MAX_SEND=10000000 \
+    CACHE_MB=2000
+VOLUME /db
+# tcp 50001 / ssl 50002 (the per-coin port map is set via SERVICES at runtime)
+EXPOSE 50001 50002
+
+CMD ["electrumx_server"]
