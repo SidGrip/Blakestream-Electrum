@@ -22,6 +22,7 @@ WAIT_RPC=180
 WAIT_SYNC=1
 BUILD_IMAGES=0
 USE_BOOTSTRAP=0
+ENABLE_BLOCKFILTERS=0
 DAEMON_DATA_ROOT="${DAEMON_DATA_ROOT:-/root}"
 CONTAINER_PREFIX="${DAEMON_CONTAINER_PREFIX:-electrum-daemon}"
 DAEMON_SOURCE_REF="${DAEMON_SOURCE_REF:-master}"
@@ -148,6 +149,12 @@ Options:
   --bootstrap           Download verified 25.2 bootstraps, import them one coin
                        at a time with -loadblock, then restart steady-state.
   --open-firewall       Open daemon P2P ports in ufw. RPC stays loopback-only.
+  --enable-blockfilters Add blockfilterindex=1 + peerblockfilters=1 to each
+                       daemon config so the fleet serves BIP 157/158 compact
+                       block filters (Neutrino / SPV wallets). First daemon
+                       start builds the index synchronously; expect the RPC
+                       to be unavailable for that coin until the index catches
+                       up (hours per coin, worst case). Idempotent on --update.
   --wait-rpc SECONDS    Wait for each daemon RPC after start. Default: 180.
   --sync-timeout SECONDS Wait for each daemon to catch peer tip. Default: 7200.
   --no-wait-sync        Start daemons and return after RPC is reachable.
@@ -203,6 +210,7 @@ while [[ $# -gt 0 ]]; do
     --build-images) BUILD_IMAGES=1 ;;
     --bootstrap) USE_BOOTSTRAP=1 ;;
     --open-firewall) OPEN_FIREWALL=1 ;;
+    --enable-blockfilters) ENABLE_BLOCKFILTERS=1 ;;
     --wait-rpc)
       WAIT_RPC="${2:?--wait-rpc requires seconds}"
       shift
@@ -307,9 +315,23 @@ dbcache=1024
 maxmempool=100
 fallbackfee=0.0001
 EOF
+    # --enable-blockfilters extends the template with BIP 157/158 support so
+    # the daemon can serve compact filters to SPV wallets. The two settings
+    # are additive: blockfilterindex=1 builds and stores the index (blocks
+    # startup on first run until built); peerblockfilters=1 advertises the
+    # capability and serves filters to peers over P2P.
+    if [[ "${ENABLE_BLOCKFILTERS}" -eq 1 ]]; then
+      cat >> "$path" <<'EOF'
+blockfilterindex=1
+peerblockfilters=1
+EOF
+    fi
     chmod 600 "$path"
   else
     printf '   [dry-run] would write %s\n' "$path"
+    if [[ "${ENABLE_BLOCKFILTERS}" -eq 1 ]]; then
+      printf '   [dry-run] would append blockfilterindex=1 + peerblockfilters=1\n'
+    fi
   fi
 }
 

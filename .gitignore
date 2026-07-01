@@ -30,6 +30,7 @@ contrib/trigger_binaries
 
 # build workspaces
 .build-multi/
+.build-tools/
 
 # ElectrumX generated deploy files contain local RPC endpoints and secrets.
 server/deploy/

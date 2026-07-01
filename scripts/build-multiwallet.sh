@@ -19,6 +19,15 @@
 #   ELECTRUM_BUILD_VENV  python venv dir (created if absent)
 #   PYTHON_BIN          python with electrum runtime deps + pyinstaller
 #   COINS               space-separated tickers (default: all six)
+#   ELECTRUM_MACOS_TOOLS_DIR
+#                       macOS-only repo-local tool/cache dir for Node/npm/Electron
+#                       (default: $REPO_ROOT/.build-tools/macos)
+#   ELECTRUM_MACOS_NODE_VERSION
+#                       macOS local Node version for Electron packaging
+#                       (default: 22.23.1)
+#   ELECTRUM_MACOS_ALLOW_BREW_INSTALL
+#                       macOS-only: install missing Homebrew native tools when set
+#                       to 1 (default: 1). Set 0 to fail instead of installing.
 #   ELECTRIUM_MULTI_WINE_IMAGE
 #                       Windows Docker builder image used when target=windows
 #                       is launched from Linux
@@ -54,6 +63,11 @@ fi
 if [ "$TARGET" != "$HOST_FAMILY" ]; then
     echo "target $TARGET must be built on $TARGET (current host is $HOST_FAMILY)" >&2
     exit 2
+fi
+
+if [ "$TARGET" = "macos" ]; then
+    # Source so PATH/npm/Electron cache exports apply to this build process.
+    . "$REPO_ROOT/scripts/bootstrap-macos-build-env.sh"
 fi
 
 venv_python_path() {

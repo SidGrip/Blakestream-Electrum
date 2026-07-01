@@ -221,6 +221,11 @@ class Orchestrator:
             )
         # per-coin startup state for the UI progress screen: pending -> starting -> ready/failed
         self.status: Dict[str, str] = {t: "pending" for t in self.daemons}
+        # Windows Job Object (created lazily): every daemon Popen is assigned to a job with
+        # KILL_ON_JOB_CLOSE so the OS kills the whole daemon tree the instant THIS supervisor exits
+        # (clean quit, crash, or taskkill) — making orphaned per-coin daemons impossible on Windows,
+        # the root cause of the reopen hang. persist+reaper stays as the cross-platform fallback.
+        self._win_job = None
         # Per-coin transaction-fee policy: 'network' (dynamic estimate, falling back to the
         # fixed rate when the server can't estimate) or 'fixed' (always the saved sat/byte).
         # Persisted in a 0600 sidecar in the datadirs root; seeded network/DEFAULT_FIXED_FEERATE.
@@ -1149,6 +1154,15 @@ class Orchestrator:
                     cfg = json.load(f)
             except (ValueError, OSError):
                 cfg = {}
+        # Adopt any previously-written RPC credentials so a daemon that SURVIVED a prior app
+        # run (e.g. a Windows orphan still holding this coin's fixed RPC port) stays
+        # authenticable: daemon_alive()/start() then ADOPT it (start() is idempotent) instead
+        # of fighting it for the port — the exact race that wedged Windows reopen at "Opening
+        # your wallet". First run has no config, so a fresh random password is generated.
+        if isinstance(cfg.get("rpcpassword"), str) and cfg["rpcpassword"]:
+            d.rpc_password = cfg["rpcpassword"]
+        if isinstance(cfg.get("rpcuser"), str) and cfg["rpcuser"]:
+            d.rpc_user = cfg["rpcuser"]
         cfg.update({
             "rpcuser": d.rpc_user, "rpcpassword": d.rpc_password,
             "rpcport": d.rpc_port, "rpchost": "127.0.0.1", "rpcsock": "tcp",
@@ -1378,7 +1392,8 @@ class Orchestrator:
         IS answering, just with a different rpcpassword). Match by the coin's daemon binary
         NAME but a DIFFERENT executable path (a separate or now-deleted mount), so we never
         touch the daemon we manage this session. Linux /proc only; best-effort, silent."""
-        if not os.path.isdir("/proc"):   # non-Linux: no cheap port-owner scan; skip
+        if not os.path.isdir("/proc"):   # non-Linux (Windows/macOS): no /proc; scan the RPC port
+            self._reap_port_squatter(d)
             return
         if not d.bundled:
             # Source mode runs ``python <coin>/run_electrum daemon -d``. If the backend restarts,
@@ -1454,6 +1469,120 @@ class Orchestrator:
                 except OSError:
                     pass
 
+    def _listening_pids(self, port: int) -> list:
+        """PIDs LISTENING on 127.0.0.1:<port>, without a psutil dependency. Windows: netstat -ano;
+        macOS/BSD: lsof. Fast (~100ms) — used to gate the expensive RPC probes below so a clean
+        start (free port) does no cold-spawn CLI round-trips. Best-effort; returns [] on any error."""
+        try:
+            if sys.platform == "win32":
+                out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                     capture_output=True, text=True, timeout=10).stdout
+                needle = ":" + str(port)
+                pids = []
+                for line in out.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 5 and parts[3].upper() == "LISTENING" \
+                            and parts[1].endswith(needle) and parts[-1].isdigit():
+                        pids.append(int(parts[-1]))
+                return pids
+            out = subprocess.run(["lsof", "-nP", f"-iTCP@127.0.0.1:{port}", "-sTCP:LISTEN", "-t"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            return [int(x) for x in out.split() if x.isdigit()]
+        except Exception:
+            return []
+
+    def _reap_port_squatter(self, d: CoinDaemon) -> None:
+        """Non-/proc platforms (Windows AND macOS) counterpart of the /proc reaper. On a prior run
+        that was not tree-killed, this coin's daemon can survive and squat its fixed RPC port. If
+        the port holder does NOT accept our CURRENT rpcpassword — a foreign/old-password orphan,
+        not an adoptable one (the persisted rpcpassword normally makes it adoptable) — kill the
+        EXACT PID owning the port so our fresh daemon can bind. Kill by PID, NEVER by image name:
+        in dev/source mode d.cmd[0] is ``python``, so an /IM kill would take out every Python
+        process on the box. Runs before we spawn ours, so no daemon of ours is at risk; a holder
+        that DOES accept our creds is adoptable and left alone. Best-effort, silent."""
+        pids = self._listening_pids(d.rpc_port)
+        if not pids:
+            return   # free port (clean start) -> nothing to reap, no RPC probe needed
+        if self.daemon_accepts_current_rpc(d.ticker, timeout=2.0):
+            return   # adoptable survivor (same persisted rpcpassword) -> start() will adopt it
+        me = os.getpid()
+        for pid in pids:
+            if pid == me:
+                continue
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                                   capture_output=True, timeout=10)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+    def _ensure_win_job(self):
+        """Create (once) a Windows Job Object with KILL_ON_JOB_CLOSE. Every daemon Popen is put in
+        it, so when THIS supervisor exits for ANY reason (clean quit, crash, taskkill) the OS
+        terminates the whole daemon tree — orphaned daemons become impossible on Windows, which is
+        the root cause of the reopen hang. No-op/None off Windows or on any failure (persist+reaper
+        remain the cross-platform fallback)."""
+        if sys.platform != "win32":
+            return None
+        if self._win_job is not None:
+            return self._win_job
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            ULONG_PTR = ctypes.c_size_t
+            class BASIC(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                            ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                            ("LimitFlags", wintypes.DWORD),
+                            ("MinimumWorkingSetSize", ULONG_PTR),
+                            ("MaximumWorkingSetSize", ULONG_PTR),
+                            ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ULONG_PTR),
+                            ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+            class IOC(ctypes.Structure):
+                _fields_ = [(n, ctypes.c_ulonglong) for n in
+                            ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                             "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+            class EXT(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", BASIC), ("IoInfo", IOC),
+                            ("ProcessMemoryLimit", ULONG_PTR), ("JobMemoryLimit", ULONG_PTR),
+                            ("PeakProcessMemoryUsed", ULONG_PTR), ("PeakJobMemoryUsed", ULONG_PTR)]
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+            kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                         wintypes.LPVOID, wintypes.DWORD]
+            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+            info = EXT()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(job, 9,  # JobObjectExtendedLimitInformation
+                                                    ctypes.byref(info), ctypes.sizeof(info)):
+                return None
+            self._win_kernel32 = kernel32
+            self._win_job = job
+            return job
+        except Exception:
+            return None
+
+    def _assign_to_win_job(self, proc) -> None:
+        """Put a freshly-spawned daemon into the KILL_ON_JOB_CLOSE job (Windows only, best-effort).
+        Nested jobs (Win8+) let this coexist with any parent job Electron may impose."""
+        if sys.platform != "win32" or proc is None:
+            return
+        job = self._ensure_win_job()
+        if not job:
+            return
+        try:
+            self._win_kernel32.AssignProcessToJobObject(job, int(proc._handle))
+        except Exception:
+            pass
+
     def start(self, ticker: str) -> None:
         d = self.daemons[ticker]
         with self._start_guard(d):
@@ -1466,6 +1595,15 @@ class Orchestrator:
             # where it squats this coin's fixed RPC port and blocks our own daemon from
             # binding it). Do this BEFORE the lockfile clear + Popen below.
             self._reap_foreign_daemons(d)
+            # An orphan the reaper deliberately kept alive because it answers our CURRENT
+            # rpcpassword (an adoptable survivor of a prior run) must be ADOPTED, not duplicated:
+            # spawning a second daemon here would only fail to bind the squatted port and leave a
+            # dead process behind. Re-check now the reaper has settled — cross-platform (this is
+            # what makes a persisted-rpcpassword adopt deterministic on Win/macOS, which have no
+            # foreign-daemon /proc reaper, and tightens Linux too). Gate the cold-spawn liveness
+            # probe on a fast port check so a clean start (free port) never pays for it.
+            if self._listening_pids(d.rpc_port) and self.daemon_alive(ticker):
+                return
             # A crash or SIGKILL leaves a stale `daemon` lockfile that makes the next
             # daemon startup refuse to start ("Daemon already running (lockfile detected)").
             # If nothing is actually answering RPC, clear it so the daemon can relaunch.
@@ -1487,6 +1625,7 @@ class Orchestrator:
                 cmd.append("-d")
             d.proc = subprocess.Popen(cmd, cwd=d.cwd, env=self._env(d),
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._assign_to_win_job(d.proc)   # Windows: OS-guaranteed cleanup when this supervisor dies
 
     def wait_ready(self, ticker: str, timeout: float = 45.0) -> bool:
         d = self.daemons[ticker]
@@ -3432,9 +3571,14 @@ class Orchestrator:
     def daemon_alive(self, ticker: str, timeout: float = 10.0) -> bool:
         """Liveness via the RPC (POSIX ``daemon -d`` double-forks, so the launcher PID
         is not a reliable signal there — a reachable ``list_wallets`` is, and unlike ``getinfo`` it
-        answers for offline daemons too)."""
+        answers for offline daemons too). CRUCIAL: the CLI prints ``Error: Forbidden`` to STDOUT
+        with rc=0 when a daemon is UP but rejects our rpcpassword (a foreign/old-password orphan
+        squatting the fixed port). A naive rc/stdout check would call that 'alive' and adopt it, so
+        start() would never reach the reaper and the wallet load would then fail. Treat an
+        ``Error``-prefixed reply as NOT alive so a non-adoptable squatter is reaped, not adopted."""
         r = self._run(self.daemons[ticker], "list_wallets", timeout=timeout)
-        return r.returncode == 0 and bool(r.stdout.strip())
+        out = r.stdout.strip()
+        return r.returncode == 0 and bool(out) and not out.lower().startswith("error")
 
     def daemon_accepts_current_rpc(self, ticker: str, timeout: float = 2.0) -> bool:
         """True when a live daemon accepts this orchestrator's in-memory RPC password.
