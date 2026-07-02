@@ -16,15 +16,15 @@ Seed handling is deliberately argv-safe: a restore seed is read from **stdin**
 one. (A real desktop build sources the seed from the encrypted vault / a prompt;
 this CLI is the headless backend + smoke harness.)
 
-Examples (on the build server)::
+Examples::
 
     # multiwallet, restore the shared seed from stdin, bring up all six, then stop
-    echo "<12 words>" | ELECTRUM_WSROOT=/mnt/ram-build/wsroot \\
-        python -m unified.launcher --datadirs /mnt/ram-build/odd --smoke multi --restore
+    echo "<12 words>" | ELECTRUM_WSROOT=/path/to/wsroot \\
+        python -m unified.launcher --datadirs /path/to/datadirs --smoke multi --restore
 
     # single-coin wallet with its own fresh seed
-    ELECTRUM_WSROOT=/mnt/ram-build/wsroot \\
-        python -m unified.launcher --datadirs /mnt/ram-build/odd --smoke single BLC --create
+    ELECTRUM_WSROOT=/path/to/wsroot \\
+        python -m unified.launcher --datadirs /path/to/datadirs --smoke single BLC --create
 """
 
 import argparse

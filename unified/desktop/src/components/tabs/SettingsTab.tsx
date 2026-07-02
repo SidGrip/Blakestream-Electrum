@@ -8,6 +8,7 @@ import {
 import { useStore } from '../../store'
 import CoinIcon from '../CoinIcon'
 import { lbl, input, primaryBtn, secondaryBtn, codeBox, card, errBox } from '../uiKit'
+import { useConfirm } from '../ConfirmModal'
 import {
   defaultExplorerBase, explorerBase, setExplorerBase,
   BASE_UNIT_OPTIONS, getBaseUnit, setBaseUnit, getThousandSep, setThousandSep, formatAmount, type BaseUnit,
@@ -918,6 +919,7 @@ function ThisWalletSection({ coin }: { coin: string }) {
   const coins = useStore((s) => s.coins)
   const startCoin = useStore((s) => s.startCoin)
   const stopCoin = useStore((s) => s.stopCoin)
+  const confirm = useConfirm()
   const [busy, setBusy] = useState(false)
 
   const selStatus = coinStatus[coin] ?? 'running'
@@ -928,9 +930,14 @@ function ThisWalletSection({ coin }: { coin: string }) {
     setBusy(true)
     try {
       const r = await stopCoin(coin)
-      if (r.blocked && window.confirm(
-        `${coin} is connected to the DEX. Stopping it will cancel its DEX orders. Stop anyway?`)) {
-        await stopCoin(coin, true)
+      if (r.blocked) {
+        const ok = await confirm({
+          title: `Stop ${name(coin)}`,
+          message: `${coin} is connected to the DEX. Stopping it will cancel its DEX orders. Stop anyway?`,
+          confirmLabel: 'Stop anyway',
+          tone: 'danger',
+        })
+        if (ok) await stopCoin(coin, true)
       }
     } finally {
       setBusy(false)

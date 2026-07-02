@@ -1,7 +1,7 @@
 """Regression check for the generalized (purpose/script_type) derivation.
 
-Run on the .221 build venv:
-    PYTHONPATH=/mnt/ram-build/electrium-multi2 .build-multi/venv/bin/python \
+Run in the build venv:
+    PYTHONPATH=/path/to/electrium-multi .build-multi/venv/bin/python \
         unified/tests/test_user_coin_derivation.py
 
 Guarantee: the six built-in coins derive BYTE-IDENTICALLY to before the refactor (golden zprv +

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build standalone per-coin Electrum daemon binaries (PyInstaller onedir) for the
-# self-contained Blakestream Wallet AppImage. Run on the build server
-# (192.168.1.221) inside a venv that has pyinstaller + the electrum runtime deps.
+# self-contained Blakestream Wallet AppImage. Run on an amd64 Linux build host
+# inside a venv that has pyinstaller + the electrum runtime deps.
 #
 #   build-backend.sh <WORKSPACES_ROOT> <OUT_DIR> <BLAKE256_NATIVE_LIB> [COIN ...]
 #

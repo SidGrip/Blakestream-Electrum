@@ -13,7 +13,7 @@
 #   5. vite build + electron-builder for the requested platform (bundles backend/)
 #   6. Linux only: bake --no-sandbox into the AppImage's AppRun
 #
-# Env overrides (defaults are repo-local; the live build uses /mnt/ram-build):
+# Env overrides (defaults are repo-local; point these at a fast scratch dir for the live build):
 #   BUILD_ROOT          scratch root for venv/workspaces/backend
 #                       (default: $REPO_ROOT/.build-multi)
 #   ELECTRUM_BUILD_VENV  python venv dir (created if absent)

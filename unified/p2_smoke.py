@@ -1,17 +1,17 @@
 """P2 orchestrator integration smoke.
 
-Run on a host that has the generated per-coin workspaces (e.g. the build server
-192.168.1.221 under /mnt/ram-build/wsroot). Brings up all six daemons from ONE test
+Run on a host that has the generated per-coin workspaces (e.g. under
+/path/to/wsroot). Brings up all six daemons from ONE test
 mnemonic via the Orchestrator and verifies each daemon's first receive address
 matches the known-answer vector, then shuts everything down.
 
 This is an integration smoke (needs live workspaces + a reachable server so the
 daemons start), not a unit test — keep it out of the default pytest run.
 
-Usage on .221:
-    ELECTRUM_PYBIN=/mnt/ram-build/venv-electrum/bin/python \
-    ELECTRUM_WSROOT=/mnt/ram-build/wsroot \
-    ELECTRUM_DDROOT=/mnt/ram-build/odd \
+Usage:
+    ELECTRUM_PYBIN=/path/to/venv/bin/python \
+    ELECTRUM_WSROOT=/path/to/wsroot \
+    ELECTRUM_DDROOT=/path/to/datadirs \
     python -m unified.p2_smoke
 """
 

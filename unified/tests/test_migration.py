@@ -2,8 +2,8 @@
 
 These need no network: discovery is driven by a fake ``history`` probe so we can
 assert the gap-limit, scheme coverage, raw-key handling, and the cross-chain guard
-without a daemon. The live fund->sweep->verify path is exercised separately on the
-build server's regtest cluster.
+without a daemon. The live fund->sweep->verify path is exercised separately on a
+regtest cluster.
 """
 
 import os

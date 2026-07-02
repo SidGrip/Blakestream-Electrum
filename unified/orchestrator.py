@@ -458,13 +458,17 @@ class Orchestrator:
     @staticmethod
     def _normalize_dex_id(value) -> str:
         dex_id = str(value or "").strip()
-        if not dex_id or len(dex_id) > 128:
+        if not dex_id or len(dex_id) > 128 or re.search(r"[\x00-\x1f\x7f]", dex_id):
             return ""
         return dex_id
 
     @staticmethod
     def _normalize_dex_name(value) -> str:
+        # The name is rendered in the pairing-approval prompt: strip control chars so a
+        # hostile registrant can't inject newlines/escapes into that UI.
         dex_name = str(value or "").strip()
+        dex_name = re.sub(r"[\x00-\x1f\x7f]+", " ", dex_name)
+        dex_name = re.sub(r"\s+", " ", dex_name).strip()
         return dex_name[:80] or "Blakestream DEX"
 
     def _is_trusted_dex_locked(self, dex_id: Optional[str]) -> bool:
@@ -580,13 +584,17 @@ class Orchestrator:
             return self._dex_integration_snapshot_locked()
 
     def cancel_pending_dex_pairing(self, dex_id) -> dict:
+        """Token-free loopback route: a DEX may withdraw its OWN pending request only.
+        Returns a bare ack — never the settings snapshot, whose trusted/pending ids double
+        as the /ready pairing credential (the wallet UI clears via the authed route)."""
         dex_id = self._normalize_dex_id(dex_id)
         with self._dex_integration_lock:
             pending = self._pending_dex_pair_snapshot_locked()
             pending_id = self._normalize_dex_id((pending or {}).get("id"))
-            if dex_id and pending_id and hmac.compare_digest(dex_id, pending_id):
+            cancelled = bool(dex_id and pending_id and hmac.compare_digest(dex_id, pending_id))
+            if cancelled:
                 self._dex_pending_pair = None
-            return self._dex_integration_snapshot_locked()
+            return {"cancelled": cancelled}
 
     def set_dex_integration(self, allow_local_dex) -> dict:
         should_announce = False
@@ -622,8 +630,9 @@ class Orchestrator:
     def record_dex_heartbeat(self, dex_instance_id=None, dex_session_token=None) -> dict:
         with self._dex_integration_lock:
             if not self._dex_integration.get("allow_local_dex"):
-                snapshot = self._dex_integration_snapshot_locked()
-                return snapshot
+                # Caller identity is NOT validated on this branch — no settings snapshot
+                # (its trusted/pending ids double as the /ready pairing credential).
+                return {"allow_local_dex": False, "dex_connected": False}
             self._validate_dex_identity_locked(dex_instance_id, dex_session_token)
             self._dex_last_seen_monotonic = time.monotonic()
             self._dex_last_seen_unix = int(time.time())
@@ -761,17 +770,24 @@ class Orchestrator:
                     pending = self._set_pending_dex_pair_locked(dex_id, dex_display_name)
                     pending_id = self._normalize_dex_id((pending or {}).get("id"))
                     message = "Approve this DEX in Electrum Multiwallet settings."
-                    if pending_id and pending_id != dex_id:
+                    already_pending = bool(pending_id and pending_id != dex_id)
+                    if already_pending:
                         pending_name = self._normalize_dex_name((pending or {}).get("name"))
                         message = (
                             f"{pending_name} is already waiting for approval. "
                             "Clear it in Electrum Multiwallet settings before approving a different DEX."
                         )
+                        # The pending id becomes the pairing credential once approved —
+                        # never echo another instance's id to this token-free caller.
+                        pending = {
+                            "name": pending_name,
+                            "first_seen": (pending or {}).get("first_seen"),
+                        }
                     return {
                         "integration_allowed": True,
                         "scoped_signing": False,
                         "require_approval": True,
-                        "already_pending": bool(pending_id and pending_id != dex_id),
+                        "already_pending": already_pending,
                         "dex_instance_id": dex_id,
                         "dex_name": dex_display_name,
                         "pending_dex_pair": pending,
@@ -782,8 +798,6 @@ class Orchestrator:
                     "scoped_signing": False,
                     "require_approval": False,
                     "dex_connected": settings.get("dex_connected"),
-                    "trusted_dex_id": settings.get("trusted_dex_id"),
-                    "trusted_dex_name": settings.get("trusted_dex_name"),
                     "error": "A different DEX is already paired. Forget the paired DEX before connecting another one.",
                     "_http_status": 403,
                 }
@@ -1005,7 +1019,6 @@ class Orchestrator:
         expected_rpc_password = self.daemons[ticker].rpc_password
         if not hmac.compare_digest(str(rpc_password or ""), str(expected_rpc_password or "")):
             raise PermissionError("invalid DEX RPC credential")
-        locked = self.locked()
         wallet_pw = self._wallet_pw(ticker)
         if self.locked():
             raise PermissionError("unlock the Electrum Multiwallet before starting swaps")
@@ -1583,10 +1596,16 @@ class Orchestrator:
         except Exception:
             pass
 
-    def start(self, ticker: str) -> None:
+    def start(self, ticker: str, *, allow_inactive: bool = False) -> None:
         d = self.daemons[ticker]
         with self._start_guard(d):
             if self._stopping:   # a supervisor tick that raced stop_all into the lock: veto
+                return
+            # A supervisor tick that raced stop_coin into the lock: veto so it can't resurrect a
+            # just-stopped coin (the empty-set case is the CLI single/smoke path, which starts
+            # coins before _active is ever populated). Explicit user restarts (set_server/
+            # set_proxy) pass allow_inactive=True so reconfiguring a stopped coin still works.
+            if not allow_inactive and self._active and ticker not in self._active:
                 return
             if self.daemon_alive(ticker):   # already running (start_coin vs supervisor race): idempotent
                 return
@@ -2246,20 +2265,12 @@ class Orchestrator:
         push = str(push_amount or "").strip()
         if push:
             body["push_amount"] = push
-        try:
-            result = self._drpc(ticker, "open_channel", body, timeout=150)
-        except Exception as e:
-            raise
-        return result
+        return self._drpc(ticker, "open_channel", body, timeout=150)
 
     def ln_close(self, ticker: str, channel_point: str, force: bool = False):
         body = {"channel_point": channel_point, "force": bool(force),
                 "password": self._wallet_pw(ticker)}
-        try:
-            result = self._drpc(ticker, "close_channel", body, timeout=150)
-        except Exception as e:
-            raise
-        return result
+        return self._drpc(ticker, "close_channel", body, timeout=150)
 
     def ln_pay(self, ticker: str, invoice: str, *, timeout=None, max_cltv=None, max_fee_msat=None):
         body = {"invoice": invoice, "password": self._wallet_pw(ticker)}
@@ -2269,21 +2280,13 @@ class Orchestrator:
             body["max_cltv"] = int(max_cltv)
         if max_fee_msat is not None:
             body["max_fee_msat"] = int(max_fee_msat)
-        try:
-            result = self._drpc(ticker, "lnpay", body, timeout=180)
-        except Exception as e:
-            raise
-        return result
+        return self._drpc(ticker, "lnpay", body, timeout=180)
 
     def ln_invoice(self, ticker: str, amount: str, memo: str = "", expiry: str = "3600"):
         # memo passed as --memo=<value> so arbitrary text (even a leading '-') is safe.
         self._ln_guard(str(amount), str(expiry))
-        try:
-            result = self.rpc(ticker, "add_request", str(amount), "--lightning",
-                              "--memo=" + str(memo), "--expiry", str(expiry), timeout=60)
-        except Exception as e:
-            raise
-        return result
+        return self.rpc(ticker, "add_request", str(amount), "--lightning",
+                        "--memo=" + str(memo), "--expiry", str(expiry), timeout=60)
 
     def ln_status(self, ticker: str) -> dict:
         """LN dashboard summary: enabled?, open-channel count, backups, node id, and total
@@ -2544,7 +2547,7 @@ class Orchestrator:
         self._loaded.discard(ticker)
         time.sleep(1.0)                  # let the OS release the RPC port + reap the process
         self.configure(ticker)
-        self.start(ticker)               # start() only Popens — must wait for RPC readiness
+        self.start(ticker, allow_inactive=True)   # explicit restart: bypass the stop-coin veto; start() only Popens
         if not self.wait_ready(ticker, timeout=45):
             raise RuntimeError(f"{ticker} daemon did not come back up after the server change")
         if was_loaded:
@@ -2580,7 +2583,7 @@ class Orchestrator:
         self._loaded.discard(ticker)
         time.sleep(1.0)                  # let the OS release the RPC port + reap the process
         self.configure(ticker)
-        self.start(ticker)
+        self.start(ticker, allow_inactive=True)   # explicit restart: bypass the stop-coin veto
         if not self.wait_ready(ticker, timeout=45):
             raise RuntimeError(f"{ticker} daemon did not come back up after the proxy change")
         if was_loaded:
