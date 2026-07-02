@@ -11,6 +11,7 @@ import {
 import type { LoadedTx } from '../../types'
 import { card, lbl, input, primaryBtn, secondaryBtn, errBox, codeBox } from '../uiKit'
 import ErrorOverlay from '../ErrorOverlay'
+import { useConfirm } from '../ConfirmModal'
 import { formatAmount, explorerTxUrl } from '../../explorer'
 
 // Satoshi int -> whole-coin amount string for formatAmount (which expects coin units).
@@ -134,6 +135,7 @@ function LoadTransaction({ coin }: { coin: string }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  const confirm = useConfirm()
 
   const reset = () => { setResult(null); setErr('') }
 
@@ -168,7 +170,12 @@ function LoadTransaction({ coin }: { coin: string }) {
 
   const doBroadcast = async () => {
     if (!result?.raw) return
-    if (!window.confirm(`Broadcast this ${coin} transaction to the network? This cannot be undone.`)) return
+    if (!(await confirm({
+      title: 'Broadcast transaction',
+      message: `Broadcast this ${coin} transaction to the network? This cannot be undone.`,
+      confirmLabel: 'Broadcast',
+      tone: 'danger',
+    }))) return
     setBusy(true); setErr('')
     try {
       const { txid: id } = await broadcastTransaction(coin, result.raw)
@@ -283,13 +290,19 @@ function TxView({
 function BroadcastableResult({ coin, tx }: { coin: string; tx: LoadedTx }) {
   const connected = useStore((s) => s.connected[coin] ?? false)
   const pushToast = useStore((s) => s.pushToast)
+  const confirm = useConfirm()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [done, setDone] = useState<string | null>(null)
 
   const broadcast = async () => {
     if (!tx.raw) return
-    if (!window.confirm(`Broadcast this ${coin} transaction to the network? This cannot be undone.`)) return
+    if (!(await confirm({
+      title: 'Broadcast transaction',
+      message: `Broadcast this ${coin} transaction to the network? This cannot be undone.`,
+      confirmLabel: 'Broadcast',
+      tone: 'danger',
+    }))) return
     setBusy(true); setErr('')
     try {
       const { txid } = await broadcastTransaction(coin, tx.raw)
