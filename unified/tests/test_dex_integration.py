@@ -80,7 +80,9 @@ def test_dex_integration_ready_payload_is_non_secret_and_owner_only(tmp_path):
         assert second["already_pending"] is True
         assert second["dex_instance_id"] == "other-dex-id"
         assert "dex_session_token" not in second
-        assert second["pending_dex_pair"]["id"] == "dex-test-id"
+        # Another instance's pending id must never be echoed — only its display name.
+        assert "id" not in second["pending_dex_pair"]
+        assert second["pending_dex_pair"]["name"] == "Test DEX"
         assert "already waiting" in second["message"]
         assert orch.dex_integration_settings()["pending_dex_pair"]["id"] == "dex-test-id"
 
@@ -88,15 +90,28 @@ def test_dex_integration_ready_payload_is_non_secret_and_owner_only(tmp_path):
         assert cleared["pending_dex_pair"] is None
         second_pending = orch.dex_ready_status("other-dex-id", "Other DEX")
         assert second_pending["pending_dex_pair"]["id"] == "other-dex-id"
+        # Token-free cancel: only the exact pending id cancels, and the response is a
+        # bare ack — never the settings snapshot (ids are pairing credentials).
         wrong_cancel = orch.cancel_pending_dex_pairing("dex-test-id")
-        assert wrong_cancel["pending_dex_pair"]["id"] == "other-dex-id"
+        assert wrong_cancel == {"cancelled": False}
+        assert orch.dex_integration_settings()["pending_dex_pair"]["id"] == "other-dex-id"
         cancelled = orch.cancel_pending_dex_pairing("other-dex-id")
-        assert cancelled["pending_dex_pair"] is None
+        assert cancelled == {"cancelled": True}
+        assert orch.dex_integration_settings()["pending_dex_pair"] is None
         orch.dex_ready_status("dex-test-id", "Test DEX")
 
         approved = orch.approve_dex_pairing("dex-test-id", "Test DEX")
         assert approved["trusted_dex_id"] == "dex-test-id"
         assert approved["trusted_dex_name"] == "Test DEX"
+
+        # With a DEX paired, an unknown instance gets a 403 that must not reveal
+        # the trusted identity (it doubles as the /ready pairing credential).
+        rejected = orch.dex_ready_status("other-dex-id", "Other DEX")
+        assert rejected["_http_status"] == 403
+        assert "trusted_dex_id" not in rejected
+        assert "trusted_dex_name" not in rejected
+        assert "dex_session_token" not in rejected
+        assert "coins" not in rejected
 
         ready = orch.dex_ready_status("dex-test-id", "Test DEX")
         assert ready["integration_allowed"] is True
@@ -115,6 +130,23 @@ def test_dex_integration_ready_payload_is_non_secret_and_owner_only(tmp_path):
         assert "dex_session_token" not in ready["coins"]["BLC"]
         assert "rpc_password" not in ready["coins"]["BLC"]
         assert "password" not in ready["coins"]["BLC"]
+    finally:
+        orch.stop_all()
+
+
+def test_dex_identity_is_sanitized_for_display(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    try:
+        orch.set_dex_integration(True)
+        # Control chars in the name must not reach the approval prompt.
+        pending = orch.dex_ready_status("dex-test-id", "Evil\r\nDEX\x07 \x1b[31mname")
+        assert pending["require_approval"] is True
+        name = orch.dex_integration_settings()["pending_dex_pair"]["name"]
+        assert name == "Evil DEX [31mname"
+        assert not any(ord(c) < 0x20 or ord(c) == 0x7f for c in name)
+        # An id carrying control chars is rejected outright (treated as missing).
+        bad = orch.dex_ready_status("dex\nid", "DEX")
+        assert bad["_http_status"] == 400
     finally:
         orch.stop_all()
 
@@ -147,7 +179,11 @@ def test_dex_startup_preference_is_persistent_and_owner_only(tmp_path):
 def test_dex_heartbeat_is_volatile_and_respects_consent(tmp_path):
     orch = make_orchestrator(tmp_path)
     try:
-        assert orch.record_dex_heartbeat()["dex_connected"] is False
+        # Disabled -> the caller is unvalidated: minimal body, no settings snapshot.
+        off = orch.record_dex_heartbeat()
+        assert off["dex_connected"] is False
+        assert "trusted_dex_id" not in off
+        assert "pending_dex_pair" not in off
 
         orch.set_dex_integration(True)
         orch.dex_ready_status("dex-test-id", "Test DEX")
