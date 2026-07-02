@@ -37,14 +37,14 @@ Electron renderer (this app)  ──HTTP──▶  unified.api (loopback :57100)
 
    Or load the built renderer directly: `npm run build && electron .`
 
-## Build (on the build server 192.168.1.221)
+## Build
 
 ```bash
 cd unified/desktop && npm install && npm run dist   # → release/*.AppImage
 ```
 
 Produces `release/Blakestream Electrum-<ver>.AppImage` (~110 MB, the Electron shell +
-renderer). Validated on `192.168.1.221:/mnt/ram-build`.
+renderer). Validated on an amd64 Linux host with Docker.
 
 ## State / TODO
 

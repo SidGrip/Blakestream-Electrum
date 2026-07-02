@@ -2,7 +2,7 @@
 # Carries mingw-w64 + wine-stable + nsis + build tools so per-build images
 # (Dockerfile -> FROM this) and fresh machines start instantly.
 #
-# Build + push (on the build server):
+# Build + push (on an amd64 Linux host):
 #   contrib/build-wine/build-base.sh
 # Pinned by the slim contrib/build-wine/Dockerfile as:
 #   FROM sidgrip/electrum-wine-base:25.2

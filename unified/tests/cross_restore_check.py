@@ -20,15 +20,15 @@ inside each variant workspace because ``constants.net`` is a process-global sing
 (one process can only host one coin's constants).
 
 This is an integration check (needs the 6 generated variant workspaces), not a unit test
-- keep it out of the default pytest run.  Run on the build server (192.168.1.221):
+- keep it out of the default pytest run.  Run on a build host that has the workspaces:
 
-    rsync -a unified coin-overlays sid@192.168.1.221:/mnt/ram-build/xrestore/
-    ssh sid@192.168.1.221 \
-      ELECTRUM_WSROOT=/mnt/ram-build/wsroot \
-      ELECTRUM_PYBIN=/mnt/ram-build/venv-electrum/bin/python \
-      PYTHONPATH=/mnt/ram-build/xrestore:/mnt/ram-build/wsroot/BLC \
-      /mnt/ram-build/venv-electrum/bin/python \
-        /mnt/ram-build/xrestore/unified/tests/cross_restore_check.py
+    rsync -a unified coin-overlays <build-host>:/path/to/xrestore/
+    ssh <build-host> \
+      ELECTRUM_WSROOT=/path/to/wsroot \
+      ELECTRUM_PYBIN=/path/to/venv/bin/python \
+      PYTHONPATH=/path/to/xrestore:/path/to/wsroot/BLC \
+      /path/to/venv/bin/python \
+        /path/to/xrestore/unified/tests/cross_restore_check.py
 """
 
 import json
